@@ -1,70 +1,34 @@
-import os
-import urllib.request
-import zipfile
-
-import pandas as pd
-from rdkit import Chem, RDLogger
+import numpy as np
+from rdkit import RDLogger
+from torch_molecule.datasets import load_qm9 as _tm_load_qm9
 
 from .featurize import QM9_ATOMS
 from .filtering import featurize_dataset
 
 RDLogger.DisableLog("rdApp.*")
 
-
-def download(url: str, dest: str) -> str:
-    if not os.path.exists(dest):
-        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-        print(f"  downloading {url}")
-        urllib.request.urlretrieve(url, dest)
-    return dest
-
-
-def download_and_extract(url: str, dest_zip: str, extract_dir: str, marker: str) -> str:
-    download(url, dest_zip)
-    if not os.path.exists(marker):
-        with zipfile.ZipFile(dest_zip) as z:
-            z.extractall(extract_dir)
-    return marker
-
-QM9_ZIP = "https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/molnet_publish/qm9.zip"
-QM9_UNCHARACTERIZED = "https://ndownloader.figshare.com/files/3195404"
-QM9_TARGETS_DEFAULT = ("mu", "homo")
-
-
-# Skips uncharactirized molecules (following digress code)
-def _load_skip(path: str):
-    with open(path) as f:
-        return {int(x.split()[0]) - 1 for x in f.read().split("\n")[9:-2]}
+# EDM-six DFT targets (covers FreeGress mu/HOMO + MolGuidance/VI-VFM full set).
+# Quantum-chemical properties shipped with QM9; NOT RDKit-recomputable.
+QM9_TARGETS_DEFAULT = ("mu", "alpha", "homo", "lumo", "gap", "cv")
 
 
 def load_qm9(local_dir="data", targets=QM9_TARGETS_DEFAULT, apply_filter=False, limit=None):
-    root = os.path.join(local_dir, "qm9")
-    download_and_extract(QM9_ZIP, os.path.join(root, "qm9.zip"), root,
-                         marker=os.path.join(root, "gdb9.sdf"))
-    skip = _load_skip(download(QM9_UNCHARACTERIZED, os.path.join(root, "uncharacterized.txt")))
+    # torch_molecule's loader (fetches the HF-mirrored QM9): neutral SMILES + DFT target columns.
+    ds = _tm_load_qm9(local_dir=local_dir, target_cols=list(targets))
+    smiles = list(ds.data)
+    y_all = np.asarray(ds.target, dtype="float32")
+    if limit:
+        smiles, y_all = smiles[:limit], y_all[:limit]
 
-    props = pd.read_csv(os.path.join(root, "gdb9.sdf.csv"))
-    suppl = Chem.SDMolSupplier(os.path.join(root, "gdb9.sdf"), removeHs=True, sanitize=True)
-
-    # We converto mol to smile since sdf is connection-table format  
-    smiles, sdf_rows = [], []
-    for i, mol in enumerate(suppl):
-        if i in skip or mol is None:
-            continue
-        smiles.append(Chem.MolToSmiles(mol))
-        sdf_rows.append(i)
-        if limit and len(smiles) >= limit:
-            break
-
+    # charge_aware=True unified with ZINC; QM9 is neutral so no charged tokens
+    # are expected (any that appear fall out as drop_vocab). Round-trip report-only.
     Xs, Es, kept_idx, stats = featurize_dataset(
-        smiles, QM9_ATOMS, charge_aware=False, uncharge=False, apply_filter=apply_filter)
+        smiles, QM9_ATOMS, charge_aware=True, uncharge=False, apply_filter=apply_filter)
 
-    rows = [sdf_rows[k] for k in kept_idx]
-    y = props.iloc[rows][list(targets)].to_numpy(dtype="float32")
     return {
         "X": Xs,
         "E": Es,
-        "y": y,
+        "y": y_all[kept_idx],
         "smiles": [smiles[k] for k in kept_idx],
         "atom_vocab": QM9_ATOMS,
         "targets": tuple(targets),

@@ -1,46 +1,61 @@
 import os
-import urllib.request
+import sys
 
-import pandas as pd
-from rdkit import RDLogger
+import numpy as np
+from rdkit import Chem, RDLogger
+from rdkit.Chem import Crippen, QED
+from torch_molecule.datasets import load_zinc250k
 
 from .featurize import ZINC_ATOMS
 from .filtering import featurize_dataset
 
 RDLogger.DisableLog("rdApp.*")
 
+ZINC_TARGETS_DEFAULT = ("logP", "qed", "SAS")
 
-def download(url: str, dest: str) -> str:
-    if not os.path.exists(dest):
-        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-        print(f"  downloading {url}")
-        urllib.request.urlretrieve(url, dest)
-    return dest
 
-ZINC_CSV = ("https://raw.githubusercontent.com/aspuru-guzik-group/chemical_vae/"
-            "master/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv")
-ZINC_TARGETS_DEFAULT = ("logP", "qed")
+def _sascorer():
+    # rdkit's bundled Contrib SA_Score (ships fpscores.pkl.gz); no vendoring.
+    from rdkit.Chem import RDConfig
+    sa_dir = os.path.join(RDConfig.RDContribDir, "SA_Score")
+    if sa_dir not in sys.path:
+        sys.path.append(sa_dir)
+    import sascorer
+    return sascorer
+
+
+def _compute_targets(smiles, targets):
+    sa = _sascorer() if "SAS" in targets else None
+    fns = {
+        "logP": Crippen.MolLogP,
+        "qed": QED.qed,
+        "SAS": (lambda m: sa.calculateScore(m)) if sa else None,
+    }
+    rows = []
+    for s in smiles:
+        m = Chem.MolFromSmiles(s)
+        rows.append([fns[t](m) for t in targets])
+    return np.asarray(rows, dtype="float32")
 
 
 def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
               uncharge=False, limit=None):
-
-    path = download(ZINC_CSV, os.path.join(local_dir, "zinc", "zinc250k.csv"))
-    df = pd.read_csv(path)
-    df["smiles"] = df["smiles"].str.strip()           # rows carry a trailing newline
+    # torch_molecule ZINC-250k (HuggingFace): ~250k SMILES, no targets.
+    ds = load_zinc250k(local_dir=local_dir)
+    smiles = list(ds.data)
     if limit:
-        df = df.iloc[:limit]
-    smiles = df["smiles"].tolist()
+        smiles = smiles[:limit]
 
+    # keep N+/O- (charge_aware=True); round-trip filter applied.
     Xs, Es, kept_idx, stats = featurize_dataset(
         smiles, ZINC_ATOMS, charge_aware=True, uncharge=uncharge, apply_filter=apply_filter)
 
-    y = df.iloc[kept_idx][list(targets)].to_numpy(dtype="float32")
+    kept_smiles = [smiles[k] for k in kept_idx]
     return {
         "X": Xs,
         "E": Es,
-        "y": y,
-        "smiles": [smiles[k] for k in kept_idx],
+        "y": _compute_targets(kept_smiles, targets),
+        "smiles": kept_smiles,
         "atom_vocab": ZINC_ATOMS,
         "targets": tuple(targets),
         "stats": stats,
