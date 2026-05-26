@@ -15,9 +15,9 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data + checkpoints
-data/
-checkpoints/
+# Data + checkpoints (anchored to repo root so src/data/ is NOT ignored)
+/data/
+/checkpoints/
 *.ckpt
 *.pt
 *.pth

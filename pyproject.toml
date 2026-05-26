@@ -5,16 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flow-matching-molecules"
 version = "0.0.1"
-description = "Flow Matching"
+description = "Flow Matching for Molecular Generation"
 requires-python = ">=3.10"
 dependencies = [
     "torch",
     "rdkit",
     "torch_molecule",
     "numpy",
+    "pandas",
     "matplotlib",
     "tqdm",
 ]
 
-[tool.setuptools]
-py-modules = ["data"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dataset*"]
