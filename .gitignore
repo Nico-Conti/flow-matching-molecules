@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 
 # Envs
+.env
 .venv/
 venv/
 env/
@@ -27,3 +28,5 @@ wandb/
 .DS_Store
 .idea/
 .vscode/
+
+.env

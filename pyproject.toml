@@ -15,6 +15,9 @@ dependencies = [
     "pandas",
     "matplotlib",
     "tqdm",
+    "datasets",
+    "huggingface_hub",
+    "python-dotenv",
 ]
 
 [tool.setuptools.packages.find]

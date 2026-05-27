@@ -1,27 +1,31 @@
 import torch
 from torch.utils.data import Dataset
 
+from .featurize import smiles_to_tensor
+
 
 class MoleculeDataset(Dataset):
-    def __init__(self, X, E, y, smiles=None, atom_vocab=None):
-        assert len(X) == len(E) == len(y)
-        self.X, self.E = X, E
-        self.y = torch.as_tensor(y, dtype=torch.float32)
-        self.smiles = smiles
+    def __init__(self, ds, atom_vocab, charge_aware=True):
+        self.ds = ds
         self.atom_vocab = atom_vocab
+        self.charge_aware = charge_aware
 
     @classmethod
     def from_loader(cls, d):
-        return cls(d["X"], d["E"], d["y"], d.get("smiles"), d.get("atom_vocab"))
+        return cls(d["ds"], d["atom_vocab"])
 
     def __len__(self):
-        return len(self.X)
+        return self.ds.num_rows
 
     def __getitem__(self, i):
-        return self.X[i], self.E[i], self.y[i]
+        row = self.ds[i]
+        X, E = smiles_to_tensor(row["smiles"], atom_vocab=self.atom_vocab,
+                                charge_aware=self.charge_aware)
+        y = torch.as_tensor(row["y"], dtype=torch.float32)
+        return X, E, y
 
 
-def collate_dense(batch):
+def collate_dense(batch):        
     # Xs, Es, ys = [], [], []
     # for x, e, y in batch:
     #     Xs.append(x)

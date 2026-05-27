@@ -21,10 +21,9 @@ def clean_mol(mol, uncharge: bool = False):
     return mol
 
 
-def featurize_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge=False,
-                      apply_filter=True):
-    
-    Xs, Es, kept_idx, stats = [], [], [], Counter()
+def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge=False,
+                            apply_filter=True):
+    clean, kept_idx, stats = [], [], Counter()
     for i, s in enumerate(smiles_list):
         m = Chem.MolFromSmiles(s.strip()) if isinstance(s, str) else s
         if m is None:
@@ -56,7 +55,6 @@ def featurize_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge=False
             continue
 
         stats["kept" if roundtrips else "kept_no_roundtrip"] += 1
-        Xs.append(X)
-        Es.append(E)
+        clean.append(s_clean)
         kept_idx.append(i)
-    return Xs, Es, kept_idx, dict(stats)
+    return clean, kept_idx, dict(stats)

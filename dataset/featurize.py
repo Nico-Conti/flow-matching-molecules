@@ -67,7 +67,7 @@ def smiles_to_tensor(smiles: str, atom_vocab=QM9_ATOMS, charge_aware: bool = Tru
 
 
 def tensor_to_mol(X, E, atom_vocab=QM9_ATOMS):
-    
+
     X = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else np.asarray(X)
     E = E.detach().cpu().numpy() if isinstance(E, torch.Tensor) else np.asarray(E)
     atom_idx = X.argmax(-1)
