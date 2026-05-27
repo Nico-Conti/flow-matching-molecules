@@ -51,3 +51,11 @@ def collate_dense(batch):
 
     y = torch.stack([torch.as_tensor(t, dtype=torch.float32) for t in ys])
     return {"X": X, "E": E, "y": y, "mask": mask}
+
+
+def unbatch(X, E, mask):
+    out = []
+    for b in range(X.shape[0]):
+        n = int(mask[b].sum())
+        out.append((X[b, :n], E[b, :n, :n]))
+    return out

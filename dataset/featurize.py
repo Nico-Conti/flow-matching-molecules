@@ -89,3 +89,14 @@ def tensor_to_mol(X, E, atom_vocab=QM9_ATOMS):
     except Exception:
         return None
     return mol
+
+
+def largest_fragment(mol):
+    # Returns largest fragment of unconnected mols (could happen during gen that we generated a unconnected node, following other approaches we only take the max one)
+    if mol is None:
+        return None
+    try:
+        frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+    except Exception:
+        return None
+    return max(frags, default=mol, key=lambda m: m.GetNumAtoms())
