@@ -30,3 +30,15 @@ wandb/
 .vscode/
 
 .env
+
+# Build artifacts from `pip install -e .` (regenerated each install)
+*.egg-info/
+
+# Local working notes (specs, plans, handover, data provenance).
+# Tracked via uv.lock + the source itself; these are conversational scratch.
+docs/
+
+# Tests are intentionally not version-controlled in this project; pytest still
+# discovers them via the `tests/` directory on disk. Reconsider before sharing
+# this repo more broadly — most projects track tests.
+tests/
