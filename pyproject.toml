@@ -20,6 +20,13 @@ dependencies = [
     "python-dotenv",
 ]
 
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["model", "flow", "sizes", "train", "evaluate"]
+
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["dataset*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

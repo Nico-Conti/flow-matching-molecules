@@ -20,8 +20,17 @@ def vun(gen_smiles, train_smiles):
 
 
 def vun_from_graphs(graphs, train_smiles, atom_vocab=QM9_ATOMS):
-    gen = []
+
+    # repair_rate is the fraction of generations where correct_mol successfully
+    # rescued the molecule from naive-Sanitize failure.
+
+    gen, n_repaired = [], 0
     for X, E in graphs:
-        mol = largest_fragment(tensor_to_mol(X, E, atom_vocab=atom_vocab))
+        mol, was_repaired = tensor_to_mol(X, E, atom_vocab=atom_vocab)
+        if was_repaired:
+            n_repaired += 1
+        mol = largest_fragment(mol)
         gen.append(Chem.MolToSmiles(mol) if mol is not None else None)
-    return vun(gen, train_smiles)
+    out = vun(gen, train_smiles)
+    out["repair_rate"] = n_repaired / len(graphs) if graphs else 0.0
+    return out

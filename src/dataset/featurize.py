@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from rdkit import Chem
+from torch_molecule.utils.graph.graph_to_smiles import correct_mol
 
 
 QM9_ATOMS = ("C", "N", "O", "F")
@@ -66,7 +67,7 @@ def smiles_to_tensor(smiles: str, atom_vocab=QM9_ATOMS, charge_aware: bool = Tru
     return X, E
 
 
-def tensor_to_mol(X, E, atom_vocab=QM9_ATOMS):
+def tensor_to_mol(X, E, atom_vocab=QM9_ATOMS, repair=True):
 
     X = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else np.asarray(X)
     E = E.detach().cpu().numpy() if isinstance(E, torch.Tensor) else np.asarray(E)
@@ -83,12 +84,28 @@ def tensor_to_mol(X, E, atom_vocab=QM9_ATOMS):
             if k > 0:
                 rw.AddBond(i, j, _IDX_TO_BOND[k])
 
-    mol = rw.GetMol()
+    # Try naive sanitize first.
     try:
+        mol = Chem.Mol(rw)
         Chem.SanitizeMol(mol)
+        return mol, False
     except Exception:
-        return None
-    return mol
+        if not repair:
+            return None, False
+
+    # try torch_molecule's repair pipeline. Aggressive first
+    # (with fragment fusion), then plain valency repair. A fresh RWMol copy
+    # per call because correct_mol mutates its input in place;
+    for connection in (True, False):
+        candidate = Chem.RWMol(rw)
+        candidate.UpdatePropertyCache(strict=False)
+        try:
+            mol_conn, _no_correct = correct_mol(candidate, connection=connection)
+        except Exception:
+            continue
+        if mol_conn is not None:
+            return mol_conn, True
+    return None, False
 
 
 def largest_fragment(mol):

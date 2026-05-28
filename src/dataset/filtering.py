@@ -44,7 +44,7 @@ def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge
             stats["drop_kekulize"] += 1
             continue
 
-        m2 = tensor_to_mol(X, E, atom_vocab=atom_vocab)
+        m2, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=False)
         roundtrips = (
             m2 is not None
             and Chem.MolToSmiles(m2) == s_clean
