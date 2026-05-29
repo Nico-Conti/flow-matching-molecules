@@ -5,24 +5,30 @@ from .featurize import smiles_to_tensor
 
 
 class MoleculeDataset(Dataset):
-    def __init__(self, ds, atom_vocab, charge_aware=True):
+    def __init__(self, ds, atom_vocab, charge_aware=True, cache=True):
         self.ds = ds
         self.atom_vocab = atom_vocab
         self.charge_aware = charge_aware
+        self._cache = {} if cache else None
 
     @classmethod
-    def from_loader(cls, d):
-        return cls(d["ds"], d["atom_vocab"])
+    def from_loader(cls, d, cache=True):
+        return cls(d["ds"], d["atom_vocab"], cache=cache)
 
     def __len__(self):
         return self.ds.num_rows
 
     def __getitem__(self, i):
+        if self._cache is not None and i in self._cache:
+            return self._cache[i]
         row = self.ds[i]
         X, E = smiles_to_tensor(row["smiles"], atom_vocab=self.atom_vocab,
                                 charge_aware=self.charge_aware)
         y = torch.as_tensor(row["y"], dtype=torch.float32)
-        return X, E, y
+        item = (X, E, y)
+        if self._cache is not None:
+            self._cache[i] = item
+        return item
 
 
 def collate_dense(batch):        
