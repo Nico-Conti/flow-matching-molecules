@@ -18,11 +18,12 @@ dependencies = [
     "datasets",
     "huggingface_hub",
     "python-dotenv",
+    "fcd_torch",
 ]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["model", "flow", "sizes", "train", "evaluate"]
+py-modules = ["model", "flow", "sizes", "train", "evaluate", "checkpoint"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
