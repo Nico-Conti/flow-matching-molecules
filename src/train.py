@@ -80,21 +80,10 @@ def _collect_train_smiles(train_ds):
     return [r["smiles"] for r in rows]
 
 
-def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
-          ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
-          seed=0, device=None, subset=None, log_every=50, dataset="qm9",
-          save_path=None, save_every=0, push_repo=None, resume=True,
-          grad_clip=None):
-    from dataset.torch_dataset import MoleculeDataset, collate_dense
+def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.10):
+    from dataset.torch_dataset import MoleculeDataset
 
-    # The local checkpoint path is implicit from push_repo unless given.
-    if save_path is None and push_repo is not None:
-        from checkpoint import repo_to_path
-        save_path = repo_to_path(push_repo)
-
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     g = torch.Generator().manual_seed(seed)
-
     if dataset == "qm9":
         from dataset.qm9 import load_qm9
         d = load_qm9()
@@ -105,7 +94,6 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
         raise ValueError(f"unknown dataset {dataset!r}; expected 'qm9' or 'zinc'")
     full = MoleculeDataset.from_loader(d)
     atom_vocab = d["atom_vocab"]
-    k_X, k_E = len(atom_vocab), 4
 
     n_total = len(full)
     if subset is not None:
@@ -118,13 +106,40 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     assert n_train > 0, f"split too aggressive: n_train={n_train} (val={n_val}, test={n_test})"
     train_ds, val_ds, test_ds = random_split(full, [n_train, n_val, n_test], generator=g)
 
+    return {
+        "train_ds": train_ds, "val_ds": val_ds, "test_ds": test_ds,
+        "atom_vocab": atom_vocab, "k_X": len(atom_vocab), "k_E": 4,
+        "train_smiles": _collect_train_smiles(train_ds),
+        "test_smiles": _collect_train_smiles(test_ds) if n_test > 0 else [],
+    }
+
+
+def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
+          ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
+          seed=0, device=None, subset=None, log_every=50, dataset="qm9",
+          save_path=None, save_every=0, push_repo=None, resume=True,
+          grad_clip=None):
+    from dataset.torch_dataset import collate_dense
+
+    # The local checkpoint path is implicit from push_repo unless given.
+    if save_path is None and push_repo is not None:
+        from checkpoint import repo_to_path
+        save_path = repo_to_path(push_repo)
+
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+ 
+    sp = build_split(dataset=dataset, subset=subset, seed=seed,
+                     val_frac=val_frac, test_frac=test_frac)
+    train_ds, val_ds = sp["train_ds"], sp["val_ds"]
+    atom_vocab, k_X, k_E = sp["atom_vocab"], sp["k_X"], sp["k_E"]
+    train_smiles, test_smiles = sp["train_smiles"], sp["test_smiles"]
+
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               collate_fn=collate_dense)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_dense)
 
-    train_smiles = _collect_train_smiles(train_ds)
-    test_smiles = _collect_train_smiles(test_ds) if n_test > 0 else []
     # Build the size histogram from SMILES (parse-only) rather than from_dataset,
     # which would featurize the whole split just to read atom counts.
     size_sampler = SizeSampler.from_smiles(train_smiles)
@@ -142,9 +157,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     best_val = float("inf")
 
     def _save(epoch, path, push=False, tag="checkpoint"):
-        # Saves live training weights + EMA shadow + optimizer/scheduler state,
-        # so the checkpoint is both eval-ready and resume-ready. Each push uses
-        # a descriptive commit message, building a navigable HF commit history.
+        # Saves live training weights + EMA shadow + optimizer/scheduler state.
         from checkpoint import save_checkpoint, push_checkpoint_to_hf
         val = history["val_loss"][-1] if history["val_loss"] else float("nan")
         save_checkpoint(path, model, k_X=k_X, k_E=k_E,

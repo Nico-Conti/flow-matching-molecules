@@ -45,7 +45,7 @@ def fm_loss(model, batch, lambda_E=1.0):
 
 
 @torch.no_grad()
-def sample(model, n_list, k_X, k_E, steps=100, device="cpu"):
+def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu"):
     model.eval()
     bs = len(n_list)
     n = max(n_list)
@@ -58,7 +58,7 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu"):
     E = 0.5 * (E + E.transpose(1, 2))
     X, E = mask_graph(X, E, node_mask)
 
-    ts = torch.linspace(0, 1, steps + 1, device=device)
+    ts = torch.linspace(0, t_end, steps + 1, device=device)
     for i in range(steps):
         t = ts[i].expand(bs)
         dt = ts[i + 1] - ts[i]
@@ -68,10 +68,7 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu"):
         E = 0.5 * (E + E.transpose(1, 2))
         X, E = mask_graph(X, E, node_mask)
 
-    # E stays exactly symmetric through the loop (symmetric averaging + symmetric
-    # mask), so argmax over identical (i,j)/(j,i) vectors yields a symmetric
-    # one-hot automatically -- no tie-break needed. The diagonal is ignored by
-    # tensor_to_mol (it reads the strict upper triangle only).
+   
     Xoh = F.one_hot(X.argmax(-1), k_X).to(X.dtype)
     Eoh = F.one_hot(E.argmax(-1), k_E).to(E.dtype)
     Xoh, Eoh = mask_graph(Xoh, Eoh, node_mask)
