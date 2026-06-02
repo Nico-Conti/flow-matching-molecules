@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader, random_split
 from model import FMModel
 from flow import fm_loss
 from sizes import SizeSampler
+from seeding import set_seed
 
 
 class EMA:
@@ -118,7 +119,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
           ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
           save_path=None, save_every=0, push_repo=None, resume=True,
-          grad_clip=None):
+          grad_clip=None, deterministic=False):
     from dataset.torch_dataset import collate_dense
 
     # The local checkpoint path is implicit from push_repo unless given.
@@ -128,15 +129,17 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
- 
+    set_seed(seed, deterministic=deterministic)
+
     sp = build_split(dataset=dataset, subset=subset, seed=seed,
                      val_frac=val_frac, test_frac=test_frac)
     train_ds, val_ds = sp["train_ds"], sp["val_ds"]
     atom_vocab, k_X, k_E = sp["atom_vocab"], sp["k_X"], sp["k_E"]
     train_smiles, test_smiles = sp["train_smiles"], sp["test_smiles"]
 
+    loader_gen = torch.Generator().manual_seed(seed)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_dense)
+                              collate_fn=collate_dense, generator=loader_gen)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_dense)
 

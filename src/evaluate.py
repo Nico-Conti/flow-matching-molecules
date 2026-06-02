@@ -3,6 +3,7 @@ import torch
 from dataset.torch_dataset import unbatch
 from dataset.metrics import vun_from_graphs
 from flow import sample
+from seeding import set_seed
 
 
 def _fcd(gen_smiles, ref_smiles, device):
@@ -18,7 +19,9 @@ def _fcd(gen_smiles, ref_smiles, device):
 @torch.no_grad()
 def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
              n_samples=1000, batch=256, steps=100, t_end=1.0, device="cpu",
-             repair=False, fcd_ref=None, fcd_device=None):
+             repair=False, fcd_ref=None, fcd_device=None, seed=None):
+    if seed is not None:
+        set_seed(seed)
     graphs = []
     remaining = n_samples
     while remaining > 0:
