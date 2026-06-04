@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader, random_split
 
 from model import FMModel
-from flow import fm_loss
+from methods import get_method
 from sizes import SizeSampler
 from seeding import set_seed
 
@@ -38,10 +38,10 @@ class EMA:
                 p.data.copy_(b)
 
 
-def train_step(model, batch, optimizer, lambda_E=1.0, grad_clip=None):
+def train_step(model, method, batch, optimizer, lambda_E=1.0, grad_clip=None):
     model.train()
     optimizer.zero_grad()
-    loss, parts = fm_loss(model, batch, lambda_E=lambda_E)
+    loss, parts = method.loss(model, batch, lambda_E=lambda_E)
     loss.backward()
     if grad_clip is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -54,14 +54,14 @@ def train_step(model, batch, optimizer, lambda_E=1.0, grad_clip=None):
 
 
 @torch.no_grad()
-def _val_loss(model, val_loader, lambda_E, device, ema=None):
+def _val_loss(model, method, val_loader, lambda_E, device, ema=None):
     model.eval()
     def _run():
         total, n_batches = 0.0, 0
         for batch in val_loader:
             batch = {k: v.to(device) for k, v in batch.items()
                      if k in ("X", "E", "mask")}
-            loss, _ = fm_loss(model, batch, lambda_E=lambda_E)
+            loss, _ = method.loss(model, batch, lambda_E=lambda_E)
             total += float(loss.detach())
             n_batches += 1
         return total / max(n_batches, 1)
@@ -119,7 +119,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
           ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
           save_path=None, save_every=0, push_repo=None, resume=True,
-          grad_clip=None, deterministic=False):
+          grad_clip=None, deterministic=False, method="fm_graph"):
     from dataset.torch_dataset import collate_dense
 
     # The local checkpoint path is implicit from push_repo unless given.
@@ -147,6 +147,9 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     # which would featurize the whole split just to read atom counts.
     size_sampler = SizeSampler.from_smiles(train_smiles)
 
+    method_name = method
+    method = get_method(method_name)
+
     model = FMModel(k_X=k_X, k_E=k_E).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -168,6 +171,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                         train_smiles=train_smiles, history=history,
                         ema_shadow=(ema.shadow if ema is not None else None),
                         optimizer=opt, scheduler=sched, epoch=epoch,
+                        method=method_name,
                         extra={"dataset": dataset, "lambda_E": lambda_E,
                                "seed": seed, "best_val": best_val})
         msg = f"  {tag} saved -> {path} (epoch {epoch})"
@@ -211,7 +215,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()
                      if k in ("X", "E", "mask")}
-            comp = train_step(model, batch, opt, lambda_E=lambda_E,
+            comp = train_step(model, method, batch, opt, lambda_E=lambda_E,
                               grad_clip=grad_clip)
             if ema is not None:
                 ema.update()
@@ -228,7 +232,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                       f"lr {sched.get_last_lr()[0]:.2e}")
             step += 1
         sched.step()
-        val_loss = _val_loss(model, val_loader, lambda_E, device, ema=ema)
+        val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema)
         history["val_loss"].append(val_loss)
         print(f"epoch {epoch} done — val_loss {val_loss:.4f}")
         if save_path and val_loss < best_val:

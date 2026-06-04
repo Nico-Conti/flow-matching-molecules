@@ -2,7 +2,7 @@ import torch
 
 from dataset.torch_dataset import unbatch
 from dataset.metrics import vun_from_graphs
-from flow import sample
+from methods import get_method
 from seeding import set_seed
 
 
@@ -19,7 +19,10 @@ def _fcd(gen_smiles, ref_smiles, device):
 @torch.no_grad()
 def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
              n_samples=1000, batch=256, steps=100, t_end=1.0, device="cpu",
-             repair=False, fcd_ref=None, fcd_device=None, seed=None):
+             repair=False, fcd_ref=None, fcd_device=None, seed=None,
+             method="fm_graph"):
+    if isinstance(method, str):
+        method = get_method(method)
     if seed is not None:
         set_seed(seed)
     graphs = []
@@ -27,8 +30,8 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
     while remaining > 0:
         b = min(batch, remaining)
         n_list = size_sampler.sample(b)
-        Xoh, Eoh, mask = sample(model, n_list, k_X, k_E, steps=steps,
-                                t_end=t_end, device=device)
+        Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
+                                       t_end=t_end, device=device)
         graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
         remaining -= b
 

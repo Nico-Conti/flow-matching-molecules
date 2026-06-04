@@ -23,11 +23,11 @@ dependencies = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["model", "flow", "sizes", "train", "evaluate", "checkpoint"]
+py-modules = ["model", "sizes", "train", "evaluate", "checkpoint"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["dataset*"]
+include = ["dataset*", "methods*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

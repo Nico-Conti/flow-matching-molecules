@@ -4,6 +4,13 @@ import torch.nn.functional as F
 from model import mask_graph
 
 
+# ---------------------------------------------------------------------------
+# Continuous (Gaussian) flow matching on graphs: linear interpolation of one-hot
+# node/edge features from a Gaussian prior, MSE-to-velocity training loss, and
+# deterministic ODE (Euler) sampling with a final argmax back to one-hot.
+# ---------------------------------------------------------------------------
+
+
 def sample_xt(X1, E1, node_mask, t):
     X0 = torch.randn_like(X1)
     E0 = torch.randn_like(E1)
@@ -68,8 +75,21 @@ def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu"):
         E = 0.5 * (E + E.transpose(1, 2))
         X, E = mask_graph(X, E, node_mask)
 
-   
     Xoh = F.one_hot(X.argmax(-1), k_X).to(X.dtype)
     Eoh = F.one_hot(E.argmax(-1), k_E).to(E.dtype)
     Xoh, Eoh = mask_graph(Xoh, Eoh, node_mask)
     return Xoh, Eoh, node_mask
+
+
+class FMGraph:
+    """Continuous Gaussian flow matching: linear interpolation of one-hot
+    features, MSE-to-velocity loss, deterministic ODE Euler sampling."""
+
+    name = "fm_graph"
+
+    def loss(self, model, batch, lambda_E=1.0):
+        return fm_loss(model, batch, lambda_E=lambda_E)
+
+    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0):
+        return sample(model, n_list, k_X, k_E, steps=steps, t_end=t_end,
+                      device=device)

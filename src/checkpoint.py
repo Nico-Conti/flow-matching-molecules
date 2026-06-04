@@ -33,12 +33,14 @@ def _model_kwargs(model, k_X, k_E):
 
 def save_checkpoint(path, model, *, k_X, k_E, atom_vocab, size_sampler,
                     train_smiles, history=None, extra=None,
-                    ema_shadow=None, optimizer=None, scheduler=None, epoch=None):
+                    ema_shadow=None, optimizer=None, scheduler=None, epoch=None,
+                    method="fm_graph"):
     # state_dict = live training weights; ema_shadow = EMA copy used for eval.
     # Both are kept so a checkpoint is eval-ready (EMA) and resume-ready (live
     # weights + optimizer state).
     payload = {
         "format": CKPT_FORMAT,
+        "method": method,
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "model_kwargs": _model_kwargs(model, k_X, k_E),
         "atom_vocab": list(atom_vocab),
@@ -80,6 +82,7 @@ def load_checkpoint(path, device=None, eval_weights=True):
     k_E = ckpt["model_kwargs"]["k_E"]
     return {
         "model": model,
+        "method": ckpt.get("method", "fm_graph"),
         "size_sampler": SizeSampler(ckpt["size_counts"]),
         "train_smiles": ckpt["train_smiles"],
         "atom_vocab": tuple(ckpt["atom_vocab"]),
