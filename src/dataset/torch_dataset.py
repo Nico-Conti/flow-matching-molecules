@@ -13,7 +13,8 @@ class MoleculeDataset(Dataset):
 
     @classmethod
     def from_loader(cls, d, cache=True):
-        return cls(d["ds"], d["atom_vocab"], cache=cache)
+        return cls(d["ds"], d["atom_vocab"],
+                   charge_aware=d.get("charge_aware", True), cache=cache)
 
     def __len__(self):
         return self.ds.num_rows

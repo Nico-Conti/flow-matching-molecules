@@ -20,7 +20,7 @@ def _fcd(gen_smiles, ref_smiles, device):
 def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
              n_samples=1000, batch=256, steps=100, t_end=1.0, device="cpu",
              repair=False, fcd_ref=None, fcd_device=None, seed=None,
-             method="fm_graph"):
+             method="fm_graph", partial_charges=False):
     if isinstance(method, str):
         method = get_method(method)
     if seed is not None:
@@ -36,9 +36,10 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
         remaining -= b
 
     if fcd_ref is None:
-        return vun_from_graphs(graphs, train_smiles, atom_vocab, repair=repair)
+        return vun_from_graphs(graphs, train_smiles, atom_vocab, repair=repair,
+                               partial_charges=partial_charges)
 
     out, gen = vun_from_graphs(graphs, train_smiles, atom_vocab, repair=repair,
-                               return_smiles=True)
+                               return_smiles=True, partial_charges=partial_charges)
     out["fcd"] = _fcd(gen, fcd_ref, fcd_device or device)
     return out

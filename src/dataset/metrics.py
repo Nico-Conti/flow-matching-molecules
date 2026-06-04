@@ -1,6 +1,8 @@
 from rdkit import Chem
 
-from .featurize import tensor_to_mol, largest_fragment, QM9_ATOMS
+from .featurize import (
+    tensor_to_mol, build_mol_partial_charges, largest_fragment, QM9_ATOMS,
+)
 
 
 def vun(gen_smiles, train_smiles):
@@ -20,15 +22,14 @@ def vun(gen_smiles, train_smiles):
 
 
 def vun_from_graphs(graphs, train_smiles, atom_vocab=QM9_ATOMS, repair=False,
-                    return_smiles=False):
-
-    # repair_rate is the fraction of generations where correct_mol successfully
-    # rescued the molecule from naive-Sanitize failure. With repair=False, only
-    # molecules that pass naive RDKit sanitization count as valid.
+                    return_smiles=False, partial_charges=False):
 
     gen, n_repaired = [], 0
     for X, E in graphs:
-        mol, was_repaired = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
+        if partial_charges:
+            mol, was_repaired = build_mol_partial_charges(X, E, atom_vocab=atom_vocab), False
+        else:
+            mol, was_repaired = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
         if was_repaired:
             n_repaired += 1
         mol = largest_fragment(mol)

@@ -9,7 +9,7 @@ _UNCHARGER = rdMolStandardize.Uncharger()
 
 
 def clean_mol(mol, uncharge: bool = False):
-    # RemoveStereochemistry, optionally neutralize charges (we use onf qm9 sdf), sanitize.
+    # RemoveStereochemistry, optionally neutralize charges, sanitize.
     if isinstance(mol, str):
         mol = Chem.MolFromSmiles(mol)
     if mol is None:

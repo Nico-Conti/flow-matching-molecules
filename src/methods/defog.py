@@ -11,8 +11,6 @@ from model import mask_graph
 
 
 def _sample_discrete(probX, probE, node_mask):
-    """Sample one-hot (X, E) from categorical probabilities. Edges are made
-    symmetric by sampling the upper triangle and mirroring (matches DeFoG)."""
     bs, n, kX = probX.shape
     kE = probE.shape[-1]
 
@@ -36,8 +34,6 @@ def _sample_discrete(probX, probE, node_mask):
 
 
 def apply_noise(X1, E1, node_mask, t, kX, kE):
-    """Corrupt clean one-hot (X1, E1) at time t: sample z_t from the categorical
-    p_t(. | x_1) = t * onehot(x_1) + (1 - t) * uniform."""
     tX = t.view(-1, 1, 1)
     tE = t.view(-1, 1, 1, 1)
     probX = tX * X1 + (1 - tX) / kX
@@ -65,8 +61,6 @@ def defog_loss(model, batch, lambda_E=1.0):
 
 
 def _rstar(zt_label, x1_oh, p0, t):
-    """R^* rate from current state z_t toward every class, given a sampled clean
-    one-hot x_1. p0 is the (scalar) uniform prior mass 1/k; t is a float."""
     dt_p = x1_oh - p0                                          # d/dt p_t(. | x1)
     pt = t * x1_oh + (1 - t) * p0                              # p_t(. | x1)
     idx = zt_label.unsqueeze(-1)
@@ -125,9 +119,6 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu", **_):
 
 
 class DeFoG:
-    """Discrete flow matching: categorical corruption from a uniform prior,
-    cross-entropy clean-graph loss, CTMC rate-matrix (R^*) sampling."""
-
     name = "defog"
 
     def loss(self, model, batch, lambda_E=1.0):

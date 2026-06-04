@@ -12,7 +12,7 @@ from .filtering import sanitize_smiles_dataset
 RDLogger.DisableLog("rdApp.*")
 
 ZINC_TARGETS_DEFAULT = ("logP", "qed", "SAS")
-ZINC_REPO_DEFAULT = "nico8771/zinc_clean"
+ZINC_REPO_DEFAULT = "nico8771/zinc_neutral"
 
 
 def _sascorer():
@@ -40,7 +40,7 @@ def _compute_targets(smiles, targets):
 
 
 def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
-              uncharge=False, limit=None, use_cache=True, repo_id=ZINC_REPO_DEFAULT,
+              uncharge=True, limit=None, use_cache=True, repo_id=ZINC_REPO_DEFAULT,
               push=False):
     # use_cache=True pulls cleaned (smiles, y) from repo_id (public) and skips the
     # torch_molecule download + sanitize/round-trip pass; on a miss it builds.
@@ -61,9 +61,10 @@ def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
         smiles = list(ds.data)
         if limit:
             smiles = smiles[:limit]
-        # keep N+/O- (charge_aware=True); round-trip filter applied.
+        # Neutralize (uncharge=True) and featurize element-only over the 9-type
+        # vocab; charges are recovered at decode, not stored. Round-trip applied.
         clean, kept_idx, stats = sanitize_smiles_dataset(
-            smiles, ZINC_ATOMS, charge_aware=True, uncharge=uncharge, apply_filter=apply_filter)
+            smiles, ZINC_ATOMS, charge_aware=False, uncharge=uncharge, apply_filter=apply_filter)
 
         from datasets import Dataset
         raw = Dataset.from_dict({
@@ -77,7 +78,8 @@ def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
 
     if limit and raw.num_rows > limit:
         raw = raw.select(range(limit))
-    return {"ds": raw, "atom_vocab": ZINC_ATOMS, "targets": tuple(targets), "stats": stats}
+    return {"ds": raw, "atom_vocab": ZINC_ATOMS, "charge_aware": False,
+            "targets": tuple(targets), "stats": stats}
 
 
 def push_zinc(zinc, repo_id=ZINC_REPO_DEFAULT, token=None):
@@ -121,8 +123,9 @@ size_categories:
 
 # {repo_id} — cleaned ZINC-250k
 
-Each row is a molecule as **canonical SMILES** plus RDKit-recomputed targets. Charged
-groups (`N+`/`O-`) are preserved. 
+Each row is a molecule as **canonical SMILES** plus RDKit-recomputed targets. Molecules
+are **neutralized** (RDKit `Uncharger`) and featurized over 9 neutral atom types; formal
+charges are recovered at decode time (DeFoG/DiGress partial-charge build), not stored.
 
 > Source: torch_molecule ZINC-250k (HuggingFace). Code:
 > <https://github.com/Nico-Conti/flow-matching-molecules> (`dataset/`).
@@ -137,7 +140,7 @@ groups (`N+`/`O-`) are preserved.
 ## Pipeline
 
 1. **Parse** with RDKit; unparseable dropped.
-2. **Standardize** — remove stereochemistry, sanitize (charges preserved; `N+`/`O-` kept).
+2. **Standardize** — remove stereochemistry, neutralize (`Uncharger`), sanitize.
 3. **Kekulize** over atom vocab ({vocab}); atoms outside the vocab dropped.
 4. **Round-trip check** — `smiles -> (X, E) -> mol -> smiles` must reproduce the
    canonical molecule as a single fragment (**filter applied**).
