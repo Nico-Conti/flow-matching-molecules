@@ -6,7 +6,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import Crippen, QED
 from torch_molecule.datasets import load_zinc250k
 
-from .featurize import ZINC_ATOMS, N_BOND_CLASSES
+from .featurize import ZINC_ATOMS, N_BOND_CLASSES, representable_smiles
 from .filtering import sanitize_smiles_dataset
 
 RDLogger.DisableLog("rdApp.*")
@@ -39,13 +39,10 @@ def _compute_targets(smiles, targets):
     return np.asarray(rows, dtype="float32")
 
 
-def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
-              uncharge=True, limit=None, use_cache=True, repo_id=ZINC_REPO_DEFAULT,
+def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=False,
+              limit=None, use_cache=True, repo_id=ZINC_REPO_DEFAULT,
               push=False):
-    # use_cache=True pulls cleaned (smiles, y) from repo_id (public) and skips the
-    # torch_molecule download + sanitize/round-trip pass; on a miss it builds.
-    # push=True uploads the cleaned dataset + card after a build (needs HF_TOKEN).
-    # Returns {"ds", "atom_vocab", "targets", "stats"}; ds = HF Dataset(smiles, y).
+    # use_cache=True pulls cleaned (smiles, y) from repo_id; on a miss it builds.
     raw, stats = None, None
     if use_cache:
         try:
@@ -61,16 +58,27 @@ def load_zinc(local_dir="data", targets=ZINC_TARGETS_DEFAULT, apply_filter=True,
         smiles = list(ds.data)
         if limit:
             smiles = smiles[:limit]
-        # Neutralize (uncharge=True) and featurize element-only over the 9-type
-        # vocab; charges are recovered at decode, not stored. Round-trip applied.
+        # Element-only over the 9 neutral types; charges recovered at decode.
         clean, kept_idx, stats = sanitize_smiles_dataset(
-            smiles, ZINC_ATOMS, charge_aware=False, uncharge=uncharge, apply_filter=apply_filter)
+            smiles, ZINC_ATOMS, charge_aware=False, apply_filter=apply_filter)
+
+        # Map each kept molecule to the form its neutral graph decodes to, and
+        # drop the few whose graph can't be sanitized (e.g. over-valent by >1).
+        repr_smiles, n_unrepr = [], 0
+        for s in clean:
+            r = representable_smiles(s, ZINC_ATOMS)
+            if r is None:
+                n_unrepr += 1
+            else:
+                repr_smiles.append(r)
+        if n_unrepr:
+            stats = {**stats, "drop_unrepresentable": n_unrepr}
 
         from datasets import Dataset
         raw = Dataset.from_dict({
-            "smiles": clean,
-            # targets recomputed from the cleaned canonical SMILES.
-            "y": [list(map(float, r)) for r in _compute_targets(clean, targets)],
+            "smiles": repr_smiles,
+            # targets computed on the representable (decoded) form, not the input.
+            "y": [list(map(float, r)) for r in _compute_targets(repr_smiles, targets)],
         })
         if push:
             _push(raw, repo_id, zinc_card(repo_id, stats, targets))
@@ -123,9 +131,11 @@ size_categories:
 
 # {repo_id} — cleaned ZINC-250k
 
-Each row is a molecule as **canonical SMILES** plus RDKit-recomputed targets. Molecules
-are **neutralized** (RDKit `Uncharger`) and featurized over 9 neutral atom types; formal
-charges are recovered at decode time (DeFoG/DiGress partial-charge build), not stored.
+Each row is a molecule as **canonical SMILES** plus RDKit-recomputed targets. DeFoG-faithful
+prep: molecules are featurized over **9 neutral atom types** (charges *not* modeled), and
+each SMILES is the form its neutral graph **decodes to** via the partial-charge build —
+cations (`N+`) recovered, anions (`[O-]`) as the neutral acid. Targets are computed on this
+representable form so they match the graph the model sees.
 
 > Source: torch_molecule ZINC-250k (HuggingFace). Code:
 > <https://github.com/Nico-Conti/flow-matching-molecules> (`dataset/`).
@@ -140,13 +150,14 @@ charges are recovered at decode time (DeFoG/DiGress partial-charge build), not s
 ## Pipeline
 
 1. **Parse** with RDKit; unparseable dropped.
-2. **Standardize** — remove stereochemistry, neutralize (`Uncharger`), sanitize.
-3. **Kekulize** over atom vocab ({vocab}); atoms outside the vocab dropped.
-4. **Round-trip check** — `smiles -> (X, E) -> mol -> smiles` must reproduce the
-   canonical molecule as a single fragment (**filter applied**).
+2. **Standardize** — remove stereochemistry, sanitize (charges left intact; *no* Uncharger).
+3. **Kekulize** over atom vocab ({vocab}), element-only; atoms outside the vocab dropped.
+4. **Representable form** — encode `smiles -> (X, E)` then decode with the partial-charge
+   build; store that SMILES. No round-trip drop; only graphs that can't be sanitized at all
+   are dropped (`drop_unrepresentable`).
 
 Bonds use {N_BOND_CLASSES} classes (none / single / double / triple). Targets
-({tgt}) are recomputed from the canonical SMILES with RDKit.
+({tgt}) are recomputed from the representable SMILES with RDKit.
 
 ### Drop / keep counts (this build)
 

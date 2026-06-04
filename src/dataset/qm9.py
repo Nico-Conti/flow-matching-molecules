@@ -38,7 +38,7 @@ def load_qm9(local_dir="data", targets=QM9_TARGETS_DEFAULT, apply_filter=False, 
             smiles, y_all = smiles[:limit], y_all[:limit]
 
         clean, kept_idx, stats = sanitize_smiles_dataset(
-            smiles, QM9_ATOMS, charge_aware=True, uncharge=False, apply_filter=apply_filter)
+            smiles, QM9_ATOMS, charge_aware=True, apply_filter=apply_filter)
 
         from datasets import Dataset
         raw = Dataset.from_dict({

@@ -156,6 +156,15 @@ def build_mol_partial_charges(X, E, atom_vocab=QM9_ATOMS):
         return None
 
 
+def representable_smiles(smiles, atom_vocab=QM9_ATOMS):
+    try:
+        X, E = smiles_to_tensor(smiles, atom_vocab=atom_vocab, charge_aware=False)
+    except Exception:
+        return None
+    mol = build_mol_partial_charges(X, E, atom_vocab=atom_vocab)
+    return Chem.MolToSmiles(mol) if mol is not None else None
+
+
 def largest_fragment(mol):
     # Returns largest fragment of unconnected mols (could happen during gen that we generated a unconnected node, following other approaches we only take the max one)
     if mol is None:

@@ -1,27 +1,22 @@
 from collections import Counter
 
 from rdkit import Chem
-from rdkit.Chem.MolStandardize import rdMolStandardize
 
 from .featurize import smiles_to_tensor, tensor_to_mol
 
-_UNCHARGER = rdMolStandardize.Uncharger()
 
-
-def clean_mol(mol, uncharge: bool = False):
-    # RemoveStereochemistry, optionally neutralize charges, sanitize.
+def clean_mol(mol):
+    # RemoveStereochemistry, sanitize. Charges are left intact (recovered at decode).
     if isinstance(mol, str):
         mol = Chem.MolFromSmiles(mol)
     if mol is None:
         return None
     Chem.RemoveStereochemistry(mol)
-    if uncharge:
-        mol = _UNCHARGER.uncharge(mol)
     Chem.SanitizeMol(mol)
     return mol
 
 
-def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge=False,
+def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True,
                             apply_filter=True):
     clean, kept_idx, stats = [], [], Counter()
     for i, s in enumerate(smiles_list):
@@ -30,7 +25,7 @@ def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True, uncharge
             stats["drop_parse"] += 1
             continue
         try:
-            m = clean_mol(m, uncharge)
+            m = clean_mol(m)
             s_clean = Chem.MolToSmiles(m)
         except Exception:
             stats["drop_sanitize"] += 1
