@@ -278,7 +278,11 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb                                      # (bs, dim)
 
 
-class FMModel(nn.Module):
+class TimeConditionedGraphTransformer(nn.Module):
+    """Graph transformer backbone with time (and optional graph-size) injected
+    through the global `y` channel. Method-agnostic: the two output heads are
+    read as velocities by continuous FM (`fm_graph`) and as logits over clean
+    classes by discrete FM (`defog`)."""
 
     def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=64, n_head=8,
                  dim_ffX=256, dim_ffE=128, dim_ffy=128, time_dim=128,
@@ -301,5 +305,5 @@ class FMModel(nn.Module):
         if self.max_n_nodes is not None:
             n_norm = node_mask.sum(dim=1, keepdim=True).float() / self.max_n_nodes
             y = torch.cat([y, n_norm], dim=-1)          # (bs, time_dim + 1)
-        vX, vE, _ = self.net(X, E, y, node_mask)
-        return vX, vE
+        outX, outE, _ = self.net(X, E, y, node_mask)    # velocities or logits
+        return outX, outE

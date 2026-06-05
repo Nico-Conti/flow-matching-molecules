@@ -21,7 +21,7 @@ def best_path(save_path):
 
 def _model_kwargs(model, k_X, k_E):
     # Snapshot the constructor defaults as they are NOW, so a checkpoint keeps
-    # rebuilding the same architecture even if FMModel's defaults change later.
+    # rebuilding the same architecture even if the model's defaults change later.
     sig = inspect.signature(type(model).__init__)
     kw = {name: p.default for name, p in sig.parameters.items()
           if p.default is not inspect.Parameter.empty}
@@ -63,13 +63,13 @@ def save_checkpoint(path, model, *, k_X, k_E, atom_vocab, size_sampler,
 def load_checkpoint(path, device=None, eval_weights=True):
     # eval_weights=True: returned model carries EMA weights (what eval uses).
     # eval_weights=False: returned model carries the live training weights.
-    from model import FMModel
+    from model import TimeConditionedGraphTransformer
     from sizes import SizeSampler
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(path, map_location=device, weights_only=False)
 
-    model = FMModel(**ckpt["model_kwargs"]).to(device)
+    model = TimeConditionedGraphTransformer(**ckpt["model_kwargs"]).to(device)
     model.load_state_dict(ckpt["state_dict"])          # live weights + buffers
     shadow = ckpt.get("ema_shadow")
     if eval_weights and shadow is not None:            # overlay EMA onto params

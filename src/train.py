@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from model import FMModel
+from model import TimeConditionedGraphTransformer
 from methods import get_method
 from sizes import SizeSampler
 from seeding import set_seed
@@ -150,7 +150,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     method_name = method
     method = get_method(method_name)
 
-    model = FMModel(k_X=k_X, k_E=k_E).to(device)
+    model = TimeConditionedGraphTransformer(k_X=k_X, k_E=k_E).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None
