@@ -20,11 +20,15 @@ def _fcd(gen_smiles, ref_smiles, device):
 def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
              n_samples=1000, batch=256, steps=100, t_end=1.0, device="cpu",
              repair=False, fcd_ref=None, fcd_device=None, seed=None,
-             method="fm_graph", partial_charges=False):
+             method="fm_graph", partial_charges=False, progress=False):
     if isinstance(method, str):
         method = get_method(method)
     if seed is not None:
         set_seed(seed)
+    bar = None
+    if progress:
+        from tqdm.auto import tqdm
+        bar = tqdm(total=n_samples, desc="sampling", unit="mol")
     graphs = []
     remaining = n_samples
     while remaining > 0:
@@ -34,12 +38,19 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
                                        t_end=t_end, device=device)
         graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
         remaining -= b
+        if bar is not None:
+            bar.update(b)
+    if bar is not None:
+        bar.close()
 
     if fcd_ref is None:
         return vun_from_graphs(graphs, train_smiles, atom_vocab, repair=repair,
-                               partial_charges=partial_charges)
+                               partial_charges=partial_charges, progress=progress)
 
     out, gen = vun_from_graphs(graphs, train_smiles, atom_vocab, repair=repair,
-                               return_smiles=True, partial_charges=partial_charges)
+                               return_smiles=True, partial_charges=partial_charges,
+                               progress=progress)
+    if progress:
+        print("computing FCD ...", flush=True)
     out["fcd"] = _fcd(gen, fcd_ref, fcd_device or device)
     return out

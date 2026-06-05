@@ -22,10 +22,14 @@ def vun(gen_smiles, train_smiles):
 
 
 def vun_from_graphs(graphs, train_smiles, atom_vocab=QM9_ATOMS, repair=False,
-                    return_smiles=False, partial_charges=False):
+                    return_smiles=False, partial_charges=False, progress=False):
 
     gen, n_repaired = [], 0
-    for X, E in graphs:
+    it = graphs
+    if progress:
+        from tqdm.auto import tqdm
+        it = tqdm(graphs, desc="decoding", unit="mol")
+    for X, E in it:
         if partial_charges:
             mol, was_repaired = build_mol_partial_charges(X, E, atom_vocab=atom_vocab), False
         else:
