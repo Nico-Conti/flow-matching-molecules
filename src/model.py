@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from features import extra_graph_features, extra_feature_dims
+
 
 # ---------------------------------------------------------------------------
 # Helpers (ported from catflow/models/layers.py and catflow/utils.py),
@@ -287,7 +289,7 @@ class TimeConditionedGraphTransformer(nn.Module):
     def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=128, n_head=8,
                  dim_ffX=256, dim_ffE=128, dim_ffy=256, time_dim=128,
                  hidden_mlp_X=256, hidden_mlp_E=128, hidden_mlp_y=256,
-                 max_n_nodes=None):
+                 max_n_nodes=None, extra_features=None, rrwp_steps=12):
         super().__init__()
         # Recorded so checkpoints rebuild the exact architecture even when
         # defaults are overridden (n_layers, dims, ...). See checkpoint._model_kwargs.
@@ -295,11 +297,22 @@ class TimeConditionedGraphTransformer(nn.Module):
             k_X=k_X, k_E=k_E, n_layers=n_layers, dx=dx, de=de, dy=dy,
             n_head=n_head, dim_ffX=dim_ffX, dim_ffE=dim_ffE, dim_ffy=dim_ffy,
             time_dim=time_dim, hidden_mlp_X=hidden_mlp_X, hidden_mlp_E=hidden_mlp_E,
-            hidden_mlp_y=hidden_mlp_y, max_n_nodes=max_n_nodes)
+            hidden_mlp_y=hidden_mlp_y, max_n_nodes=max_n_nodes,
+            extra_features=extra_features, rrwp_steps=rrwp_steps)
         self.time_emb = SinusoidalTimeEmbedding(time_dim)
         self.max_n_nodes = max_n_nodes
-        y_extra = 1 if max_n_nodes is not None else 0
-        input_dims = {"X": k_X, "E": k_E, "y": time_dim + y_extra}
+        self.extra_features = extra_features
+        self.rrwp_steps = rrwp_steps
+        if extra_features == "rrwp":
+            assert max_n_nodes is not None, "extra_features='rrwp' requires max_n_nodes"
+            ed = extra_feature_dims(rrwp_steps)
+            input_dims = {"X": k_X + ed["X"], "E": k_E + ed["E"],
+                          "y": time_dim + ed["y"]}
+        elif extra_features is None:
+            y_extra = 1 if max_n_nodes is not None else 0
+            input_dims = {"X": k_X, "E": k_E, "y": time_dim + y_extra}
+        else:
+            raise ValueError(f"unknown extra_features {extra_features!r}")
         hidden_mlp_dims = {"X": hidden_mlp_X, "E": hidden_mlp_E, "y": hidden_mlp_y}
         hidden_dims = {"dx": dx, "de": de, "dy": dy, "n_head": n_head,
                        "dim_ffX": dim_ffX, "dim_ffE": dim_ffE, "dim_ffy": dim_ffy}
@@ -309,7 +322,13 @@ class TimeConditionedGraphTransformer(nn.Module):
 
     def forward(self, X, E, t, node_mask):
         y = self.time_emb(t)                            # (bs, time_dim)
-        if self.max_n_nodes is not None:
+        if self.extra_features == "rrwp":
+            eX, eE, y_cyc = extra_graph_features(X, E, node_mask, self.rrwp_steps)
+            n_norm = node_mask.sum(dim=1, keepdim=True).float() / self.max_n_nodes
+            X = torch.cat([X, eX], dim=-1)
+            E = torch.cat([E, eE], dim=-1)
+            y = torch.cat([y, n_norm, y_cyc], dim=-1)   # time + n + cycles
+        elif self.max_n_nodes is not None:
             n_norm = node_mask.sum(dim=1, keepdim=True).float() / self.max_n_nodes
             y = torch.cat([y, n_norm], dim=-1)          # (bs, time_dim + 1)
         outX, outE, _ = self.net(X, E, y, node_mask)    # velocities or logits
