@@ -90,6 +90,6 @@ class FMGraph:
     def loss(self, model, batch, lambda_E=1.0):
         return fm_loss(model, batch, lambda_E=lambda_E)
 
-    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0):
+    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0, **kw):
         return sample(model, n_list, k_X, k_E, steps=steps, t_end=t_end,
                       device=device)

@@ -20,6 +20,7 @@ def _fcd(gen_smiles, ref_smiles, device):
 def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
              n_samples=1000, batch=256, steps=100, t_end=1.0, device="cpu",
              repair=False, fcd_ref=None, fcd_device=None, seed=None,
+             eta=0.0, distortion="identity",
              method="fm_graph", partial_charges=False, progress=False):
     if isinstance(method, str):
         method = get_method(method)
@@ -35,7 +36,8 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
         b = min(batch, remaining)
         n_list = size_sampler.sample(b)
         Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
-                                       t_end=t_end, device=device)
+                                       t_end=t_end, device=device,
+                                       eta=eta, distortion=distortion)
         graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
         remaining -= b
         if bar is not None:

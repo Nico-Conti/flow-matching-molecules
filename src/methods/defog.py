@@ -6,8 +6,15 @@ from model import mask_graph
 
 # ---------------------------------------------------------------------------
 # Discrete flow matching (DeFoG), minimal form: uniform prior, R^* rate matrix
-# only (no detailed-balance / target-guidance terms).
+# plus optional detailed-balance stochasticity (eta) and a sampling time-
+# distortion schedule. (No target-guidance term.)
 # ---------------------------------------------------------------------------
+
+
+DISTORTIONS = {
+    "identity": lambda t: t,
+    "polydec": lambda t: 2 * t - t * t,
+}
 
 
 def _sample_discrete(probX, probE, node_mask):
@@ -60,20 +67,34 @@ def defog_loss(model, batch, lambda_E=1.0):
     return loss, {"loss_x": lossX.detach(), "loss_e": lossE.detach()}
 
 
-def _rstar(zt_label, x1_oh, p0, t):
-    dt_p = x1_oh - p0                                          # d/dt p_t(. | x1)
-    pt = t * x1_oh + (1 - t) * p0                              # p_t(. | x1)
+def _dfm_vars(zt_label, x1_oh, p0, t):
+    dt_p = x1_oh - p0                              # d/dt p_t(. | x1)
+    pt = t * x1_oh + (1 - t) * p0                  # p_t(. | x1)
     idx = zt_label.unsqueeze(-1)
-    dt_p_at = dt_p.gather(-1, idx)
-    pt_at = pt.gather(-1, idx)
-    Z = (pt > 0).sum(-1, keepdim=True)
-    R = F.relu(dt_p - dt_p_at) / (Z * pt_at).clamp_min(1e-9)
+    return {
+        "pt": pt,
+        "dt_p": dt_p,
+        "pt_at": pt.gather(-1, idx),               # p_t(z_t | x1)
+        "dt_p_at": dt_p.gather(-1, idx),
+        "Z": (pt > 0).sum(-1, keepdim=True),
+        "idx": idx,
+    }
+
+
+def _rstar(v):
+    pt, pt_at = v["pt"], v["pt_at"]
+    R = F.relu(v["dt_p"] - v["dt_p_at"]) / (v["Z"] * pt_at).clamp_min(1e-9)
     R = torch.nan_to_num(R, nan=0.0, posinf=0.0, neginf=0.0)
-    return R.masked_fill(pt == 0, 0.0)
+    R = R.masked_fill(pt == 0, 0.0)                # dead column: p_t(j)=0
+    R = R.masked_fill((pt_at == 0).expand_as(R), 0.0)  # dead state: p_t(z_t)=0 -> no outflow
+    return R
+
+
+def _rdb(pt, eta):
+    return eta * pt
 
 
 def _step_probs(R, zt_label, dt):
-    """CTMC Euler step: off-diagonal mass = R * dt, diagonal absorbs the rest."""
     step = R * dt
     idx = zt_label.unsqueeze(-1)
     step.scatter_(-1, idx, 0.0)
@@ -83,8 +104,10 @@ def _step_probs(R, zt_label, dt):
 
 
 @torch.no_grad()
-def sample(model, n_list, k_X, k_E, steps=100, device="cpu", **_):
+def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
+           eta=0.0, distortion="identity", **_):
     model.eval()
+    f = DISTORTIONS[distortion]
     bs = len(n_list)
     n = max(n_list)
     node_mask = torch.zeros(bs, n, dtype=torch.bool, device=device)
@@ -97,8 +120,9 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu", **_):
     X, E = _sample_discrete(probX, probE, node_mask)           # z_0 ~ uniform
 
     for i in range(steps):
-        t = i / steps
-        dt = 1.0 / steps
+        t = f(i / steps)               # f operates on Python floats (float64)
+        s = f((i + 1) / steps)
+        dt = s - t
         tt = torch.full((bs,), t, device=device)
         logX, logE = model(X, E, tt, node_mask)
         phatX = F.softmax(logX, dim=-1)
@@ -108,8 +132,10 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu", **_):
             probX, probE = phatX, phatE
         else:
             x1X, x1E = _sample_discrete(phatX, phatE, node_mask)
-            RX = _rstar(X.argmax(-1), x1X, p0X, t)
-            RE = _rstar(E.argmax(-1), x1E, p0E, t)
+            vX = _dfm_vars(X.argmax(-1), x1X, p0X, t)
+            vE = _dfm_vars(E.argmax(-1), x1E, p0E, t)
+            RX = _rstar(vX) + _rdb(vX["pt"], eta)
+            RE = _rstar(vE) + _rdb(vE["pt"], eta)
             probX = _step_probs(RX, X.argmax(-1), dt)
             probE = _step_probs(RE, E.argmax(-1), dt)
 
@@ -124,5 +150,7 @@ class DeFoG:
     def loss(self, model, batch, lambda_E=1.0):
         return defog_loss(model, batch, lambda_E=lambda_E)
 
-    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", **kw):
-        return sample(model, n_list, k_X, k_E, steps=steps, device=device)
+    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu",
+               eta=0.0, distortion="identity", **kw):
+        return sample(model, n_list, k_X, k_E, steps=steps, device=device,
+                      eta=eta, distortion=distortion)
