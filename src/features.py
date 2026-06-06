@@ -13,8 +13,10 @@ def extra_feature_dims(k):
 
 
 def soft_adjacency(E):
-    # (bs,n,n,k_E) -> (bs,n,n): sum non-"none" bond channels (works for soft E).
-    return E[..., 1:].sum(-1)
+    # (bs,n,n,k_E) -> (bs,n,n): sum non-"none" bond channels. clamp>=0 keeps RRWP
+    # well-posed for fm_graph's Gaussian E (negative entries blow up D^-1 A powers);
+    # no-op for one-hot/simplex E (defog).
+    return E[..., 1:].sum(-1).clamp(min=0.0)
 
 
 def rrwp_features(A, k):
