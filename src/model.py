@@ -284,11 +284,18 @@ class TimeConditionedGraphTransformer(nn.Module):
     read as velocities by continuous FM (`fm_graph`) and as logits over clean
     classes by discrete FM (`defog`)."""
 
-    def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=64, n_head=8,
-                 dim_ffX=256, dim_ffE=128, dim_ffy=128, time_dim=128,
-                 hidden_mlp_X=256, hidden_mlp_E=128, hidden_mlp_y=128,
+    def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=128, n_head=8,
+                 dim_ffX=256, dim_ffE=128, dim_ffy=256, time_dim=128,
+                 hidden_mlp_X=256, hidden_mlp_E=128, hidden_mlp_y=256,
                  max_n_nodes=None):
         super().__init__()
+        # Recorded so checkpoints rebuild the exact architecture even when
+        # defaults are overridden (n_layers, dims, ...). See checkpoint._model_kwargs.
+        self.init_kwargs = dict(
+            k_X=k_X, k_E=k_E, n_layers=n_layers, dx=dx, de=de, dy=dy,
+            n_head=n_head, dim_ffX=dim_ffX, dim_ffE=dim_ffE, dim_ffy=dim_ffy,
+            time_dim=time_dim, hidden_mlp_X=hidden_mlp_X, hidden_mlp_E=hidden_mlp_E,
+            hidden_mlp_y=hidden_mlp_y, max_n_nodes=max_n_nodes)
         self.time_emb = SinusoidalTimeEmbedding(time_dim)
         self.max_n_nodes = max_n_nodes
         y_extra = 1 if max_n_nodes is not None else 0

@@ -119,7 +119,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
           ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
           save_path=None, save_every=0, push_repo=None, resume=True,
-          grad_clip=None, deterministic=False, method="fm_graph"):
+          grad_clip=None, deterministic=False, method="fm_graph", n_layers=None):
     from dataset.torch_dataset import collate_dense
 
     # The local checkpoint path is implicit from push_repo unless given.
@@ -150,7 +150,8 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     method_name = method
     method = get_method(method_name)
 
-    model = TimeConditionedGraphTransformer(k_X=k_X, k_E=k_E).to(device)
+    arch = {} if n_layers is None else {"n_layers": n_layers}
+    model = TimeConditionedGraphTransformer(k_X=k_X, k_E=k_E, **arch).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None

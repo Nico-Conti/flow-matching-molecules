@@ -20,8 +20,13 @@ def best_path(save_path):
 
 
 def _model_kwargs(model, k_X, k_E):
-    # Snapshot the constructor defaults as they are NOW, so a checkpoint keeps
-    # rebuilding the same architecture even if the model's defaults change later.
+    # Prefer the model's recorded constructor args so overrides (n_layers, dims,
+    # ...) round-trip; this is what lets a 12-layer ZINC checkpoint reload as 12.
+    if hasattr(model, "init_kwargs"):
+        kw = dict(model.init_kwargs)
+        kw["k_X"], kw["k_E"] = int(k_X), int(k_E)
+        return kw
+    # Fallback for older models: snapshot the constructor defaults as they are NOW.
     sig = inspect.signature(type(model).__init__)
     kw = {name: p.default for name, p in sig.parameters.items()
           if p.default is not inspect.Parameter.empty}
