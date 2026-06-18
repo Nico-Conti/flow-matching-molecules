@@ -48,14 +48,17 @@ def apply_noise(X1, E1, node_mask, t, kX, kE):
     return _sample_discrete(probX, probE, node_mask)
 
 
-def defog_loss(model, batch, lambda_E=1.0):
+def defog_loss(model, batch, lambda_E=1.0, cond=None, p_uncond=0.0):
     X1, E1, node_mask = batch["X"], batch["E"], batch["mask"]
     bs, n = X1.shape[0], X1.shape[1]
     kX, kE = X1.shape[-1], E1.shape[-1]
     t = torch.rand(bs, device=X1.device)
 
     Xt, Et = apply_noise(X1, E1, node_mask, t, kX, kE)
-    logX, logE = model(Xt, Et, t, node_mask)                   # read as logits
+    drop = None                                                # condition-dropout (CFG)
+    if cond is not None and p_uncond > 0:
+        drop = torch.rand(bs, device=X1.device) < p_uncond
+    logX, logE = model(Xt, Et, t, node_mask, cond=cond, drop=drop)   # read as logits
 
     e_pair = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
     diag = torch.eye(n, dtype=torch.bool, device=X1.device).view(1, n, n)
@@ -105,7 +108,8 @@ def _step_probs(R, zt_label, dt):
 
 @torch.no_grad()
 def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
-           eta=0.0, distortion="identity", **_):
+           eta=0.0, distortion="identity", cond=None, w=0.0, **_):
+    # cond: (bs, cond_dim) targets; w: CFG weight (logit-space combine).
     model.eval()
     f = DISTORTIONS[distortion]
     bs = len(n_list)
@@ -119,12 +123,19 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
     probE = torch.full((bs, n, n, k_E), p0E, device=device)
     X, E = _sample_discrete(probX, probE, node_mask)           # z_0 ~ uniform
 
+    guided = cond is not None and w != 0.0
     for i in range(steps):
         t = f(i / steps)               # f operates on Python floats (float64)
         s = f((i + 1) / steps)
         dt = s - t
         tt = torch.full((bs,), t, device=device)
-        logX, logE = model(X, E, tt, node_mask)
+        if guided:                                             # logit-space CFG combine
+            logX_c, logE_c = model(X, E, tt, node_mask, cond=cond)
+            logX_0, logE_0 = model(X, E, tt, node_mask, cond=None)
+            logX = logX_0 + w * (logX_c - logX_0)
+            logE = logE_0 + w * (logE_c - logE_0)
+        else:
+            logX, logE = model(X, E, tt, node_mask, cond=cond)
         phatX = F.softmax(logX, dim=-1)
         phatE = F.softmax(logE, dim=-1)
 
@@ -147,10 +158,10 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
 class DeFoG:
     name = "defog"
 
-    def loss(self, model, batch, lambda_E=1.0):
-        return defog_loss(model, batch, lambda_E=lambda_E)
+    def loss(self, model, batch, lambda_E=1.0, cond=None, p_uncond=0.0):
+        return defog_loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
 
     def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu",
-               eta=0.0, distortion="identity", **kw):
+               eta=0.0, distortion="identity", cond=None, w=0.0, **kw):
         return sample(model, n_list, k_X, k_E, steps=steps, device=device,
-                      eta=eta, distortion=distortion)
+                      eta=eta, distortion=distortion, cond=cond, w=w)

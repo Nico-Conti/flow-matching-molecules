@@ -284,7 +284,8 @@ class TimeConditionedGraphTransformer(nn.Module):
     def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=128, n_head=8,
                  dim_ffX=256, dim_ffE=128, dim_ffy=256, time_dim=128,
                  hidden_mlp_X=256, hidden_mlp_E=128, hidden_mlp_y=256,
-                 max_n_nodes=None, extra_features=None, rrwp_steps=12):
+                 max_n_nodes=None, extra_features=None, rrwp_steps=12,
+                 cond_dim=0, cond_emb=64):
         super().__init__()
         # Recorded so checkpoints rebuild the exact architecture even when
         # defaults are overridden (n_layers, dims, ...). See checkpoint._model_kwargs.
@@ -293,19 +294,34 @@ class TimeConditionedGraphTransformer(nn.Module):
             n_head=n_head, dim_ffX=dim_ffX, dim_ffE=dim_ffE, dim_ffy=dim_ffy,
             time_dim=time_dim, hidden_mlp_X=hidden_mlp_X, hidden_mlp_E=hidden_mlp_E,
             hidden_mlp_y=hidden_mlp_y, max_n_nodes=max_n_nodes,
-            extra_features=extra_features, rrwp_steps=rrwp_steps)
+            extra_features=extra_features, rrwp_steps=rrwp_steps,
+            cond_dim=cond_dim, cond_emb=cond_emb)
         self.time_emb = SinusoidalTimeEmbedding(time_dim)
         self.max_n_nodes = max_n_nodes
         self.extra_features = extra_features
         self.rrwp_steps = rrwp_steps
+
+        # CFG conditioning: embed the (z-scored) property vector and concat to the
+        # global y; cond=None or dropped rows use a learned null token. cond_dim=0
+        # disables it entirely.
+        self.cond_dim = cond_dim
+        y_cond = 0
+        if cond_dim > 0:
+            self.cond_mlp = nn.Sequential(
+                nn.Linear(cond_dim, cond_emb), nn.ReLU(), nn.Linear(cond_emb, cond_emb))
+            self.cond_null = nn.Parameter(torch.randn(cond_emb))
+            self.register_buffer("cond_mean", torch.zeros(cond_dim))
+            self.register_buffer("cond_std", torch.ones(cond_dim))
+            y_cond = cond_emb
+
         if extra_features == "rrwp":
             assert max_n_nodes is not None, "extra_features='rrwp' requires max_n_nodes"
             ed = extra_feature_dims(rrwp_steps)
             input_dims = {"X": k_X + ed["X"], "E": k_E + ed["E"],
-                          "y": time_dim + ed["y"]}
+                          "y": time_dim + ed["y"] + y_cond}
         elif extra_features is None:
             y_extra = 1 if max_n_nodes is not None else 0
-            input_dims = {"X": k_X, "E": k_E, "y": time_dim + y_extra}
+            input_dims = {"X": k_X, "E": k_E, "y": time_dim + y_extra + y_cond}
         else:
             raise ValueError(f"unknown extra_features {extra_features!r}")
         hidden_mlp_dims = {"X": hidden_mlp_X, "E": hidden_mlp_E, "y": hidden_mlp_y}
@@ -315,7 +331,23 @@ class TimeConditionedGraphTransformer(nn.Module):
         self.net = GraphTransformer(n_layers, input_dims, hidden_mlp_dims,
                                     hidden_dims, output_dims, nn.ReLU(), nn.ReLU())
 
-    def forward(self, X, E, t, node_mask):
+    @torch.no_grad()
+    def set_cond_stats(self, mean, std):
+        # Z-score stats for the conditioning properties (from the training split).
+        self.cond_mean.copy_(torch.as_tensor(mean, dtype=self.cond_mean.dtype))
+        self.cond_std.copy_(torch.as_tensor(std, dtype=self.cond_std.dtype).clamp_min(1e-6))
+
+    def _cond_embedding(self, cond, drop, bs, device):
+        # (bs, cond_emb): null token where cond is None or a row is dropped.
+        null = self.cond_null.expand(bs, -1)
+        if cond is None:
+            return null
+        emb = self.cond_mlp((cond - self.cond_mean) / self.cond_std)
+        if drop is not None:
+            emb = torch.where(drop.view(bs, 1), null, emb)
+        return emb
+
+    def forward(self, X, E, t, node_mask, cond=None, drop=None):
         y = self.time_emb(t)                            # (bs, time_dim)
         if self.extra_features == "rrwp":
             eX, eE, y_cyc = extra_graph_features(X, E, node_mask, self.rrwp_steps)
@@ -326,5 +358,7 @@ class TimeConditionedGraphTransformer(nn.Module):
         elif self.max_n_nodes is not None:
             n_norm = node_mask.sum(dim=1, keepdim=True).float() / self.max_n_nodes
             y = torch.cat([y, n_norm], dim=-1)          # (bs, time_dim + 1)
+        if self.cond_dim > 0:
+            y = torch.cat([y, self._cond_embedding(cond, drop, X.shape[0], X.device)], dim=-1)
         outX, outE, _ = self.net(X, E, y, node_mask)    # velocities or logits
         return outX, outE

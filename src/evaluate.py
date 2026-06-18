@@ -56,3 +56,35 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
         print("computing FCD ...", flush=True)
     out["fcd"] = _fcd(gen, fcd_ref, fcd_device or device)
     return out
+
+
+@torch.no_grad()
+def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targets,
+                                cond_cols=("homo",), w_list=(0.0, 1.0, 2.0, 3.0, 5.0),
+                                n_per_target=10, steps=100, t_end=1.0, device="cpu",
+                                method="fm_graph", repair=False, seed=None,
+                                optimize=False, progress=True):
+
+    from dataset.properties import property_mae
+    if isinstance(method, str):
+        method = get_method(method)
+    targets = torch.as_tensor(targets, dtype=torch.float32).view(-1, len(cond_cols))
+
+    results = {}
+    for w in w_list:
+        if seed is not None:
+            set_seed(seed)
+        graphs, ys = [], []
+        for tvec in targets:
+            n_list = size_sampler.sample(n_per_target)
+            cond = tvec.view(1, -1).repeat(n_per_target, 1).to(device)
+            Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
+                                           t_end=t_end, device=device, cond=cond, w=w)
+            graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
+            ys.extend([tvec.tolist()] * n_per_target)
+        mae = property_mae(graphs, ys, target_cols=tuple(cond_cols),
+                           atom_vocab=atom_vocab, repair=repair, optimize=optimize,
+                           progress=progress)
+        results[w] = mae
+        print(f"w={w}: {mae}")
+    return results

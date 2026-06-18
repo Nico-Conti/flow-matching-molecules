@@ -21,6 +21,10 @@ dependencies = [
     "fcd_torch",
 ]
 
+[project.optional-dependencies]
+
+eval = ["psi4"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = ["model", "sizes", "train", "evaluate", "checkpoint"]

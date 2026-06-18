@@ -29,14 +29,18 @@ def sample_xt(X1, E1, node_mask, t):
     return Xt, Et, vX, vE
 
 
-def fm_loss(model, batch, lambda_E=1.0):
+def fm_loss(model, batch, lambda_E=1.0, cond=None, p_uncond=0.0):
 
     X1, E1, node_mask = batch["X"], batch["E"], batch["mask"]
     bs, n = X1.shape[0], X1.shape[1]
     t = torch.rand(bs, device=X1.device)
 
     Xt, Et, vX, vE = sample_xt(X1, E1, node_mask, t)
-    pX, pE = model(Xt, Et, t, node_mask)
+   
+    drop = None
+    if cond is not None and p_uncond > 0:
+        drop = torch.rand(bs, device=X1.device) < p_uncond
+    pX, pE = model(Xt, Et, t, node_mask, cond=cond, drop=drop)
 
     x_mask = node_mask.unsqueeze(-1).to(X1.dtype)                       # bs,n,1
     e_pair = (node_mask.unsqueeze(1) & node_mask.unsqueeze(2))          # bs,n,n
@@ -52,7 +56,9 @@ def fm_loss(model, batch, lambda_E=1.0):
 
 
 @torch.no_grad()
-def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu"):
+def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu",
+           cond=None, w=0.0):
+    
     model.eval()
     bs = len(n_list)
     n = max(n_list)
@@ -65,11 +71,18 @@ def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu"):
     E = 0.5 * (E + E.transpose(1, 2))
     X, E = mask_graph(X, E, node_mask)
 
+    guided = cond is not None and w != 0.0
     ts = torch.linspace(0, t_end, steps + 1, device=device)
     for i in range(steps):
         t = ts[i].expand(bs)
         dt = ts[i + 1] - ts[i]
-        vX, vE = model(X, E, t, node_mask)
+        if guided:                                      # v_∅ + w (v_c − v_∅)
+            vX_c, vE_c = model(X, E, t, node_mask, cond=cond)
+            vX_0, vE_0 = model(X, E, t, node_mask, cond=None)
+            vX = vX_0 + w * (vX_c - vX_0)
+            vE = vE_0 + w * (vE_c - vE_0)
+        else:
+            vX, vE = model(X, E, t, node_mask, cond=cond)
         X = X + dt * vX
         E = E + dt * vE
         E = 0.5 * (E + E.transpose(1, 2))
@@ -82,14 +95,13 @@ def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu"):
 
 
 class FMGraph:
-    """Continuous Gaussian flow matching: linear interpolation of one-hot
-    features, MSE-to-velocity loss, deterministic ODE Euler sampling."""
 
     name = "fm_graph"
 
-    def loss(self, model, batch, lambda_E=1.0):
-        return fm_loss(model, batch, lambda_E=lambda_E)
+    def loss(self, model, batch, lambda_E=1.0, cond=None, p_uncond=0.0):
+        return fm_loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
 
-    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0, **kw):
+    def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0,
+               cond=None, w=0.0, **kw):
         return sample(model, n_list, k_X, k_E, steps=steps, t_end=t_end,
-                      device=device)
+                      device=device, cond=cond, w=w)

@@ -38,10 +38,18 @@ class EMA:
                 p.data.copy_(b)
 
 
-def train_step(model, method, batch, optimizer, lambda_E=1.0, grad_clip=None):
+def _cond_from_batch(batch, cond_idx):
+    # (bs, len(cond_idx)) property targets, or None if not conditioning.
+    if cond_idx is None or "y" not in batch:
+        return None
+    return batch["y"][:, cond_idx]
+
+
+def train_step(model, method, batch, optimizer, lambda_E=1.0, grad_clip=None,
+               cond=None, p_uncond=0.0):
     model.train()
     optimizer.zero_grad()
-    loss, parts = method.loss(model, batch, lambda_E=lambda_E)
+    loss, parts = method.loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
     loss.backward()
     if grad_clip is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -54,14 +62,15 @@ def train_step(model, method, batch, optimizer, lambda_E=1.0, grad_clip=None):
 
 
 @torch.no_grad()
-def _val_loss(model, method, val_loader, lambda_E, device, ema=None):
+def _val_loss(model, method, val_loader, lambda_E, device, ema=None, cond_idx=None):
     model.eval()
+    keep = ("X", "E", "mask", "y") if cond_idx is not None else ("X", "E", "mask")
     def _run():
         total, n_batches = 0.0, 0
         for batch in val_loader:
-            batch = {k: v.to(device) for k, v in batch.items()
-                     if k in ("X", "E", "mask")}
-            loss, _ = method.loss(model, batch, lambda_E=lambda_E)
+            batch = {k: v.to(device) for k, v in batch.items() if k in keep}
+            cond = _cond_from_batch(batch, cond_idx)
+            loss, _ = method.loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=0.0)
             total += float(loss.detach())
             n_batches += 1
         return total / max(n_batches, 1)
@@ -71,14 +80,23 @@ def _val_loss(model, method, val_loader, lambda_E, device, ema=None):
     return _run()
 
 
-def _collect_train_smiles(train_ds):
-    base = train_ds
-    indices = None
+def _resolve_rows(train_ds):
+    # Walk nested Subsets back to the underlying HF dataset for this split.
+    base, indices = train_ds, None
     while hasattr(base, "dataset"):
         indices = base.indices if indices is None else [base.indices[i] for i in indices]
         base = base.dataset
-    rows = base.ds if indices is None else base.ds.select(indices)
-    return [r["smiles"] for r in rows]
+    return base.ds if indices is None else base.ds.select(indices)
+
+
+def _collect_train_smiles(train_ds):
+    return [r["smiles"] for r in _resolve_rows(train_ds)]
+
+
+def _collect_train_targets(train_ds):
+    # (N, n_targets) tensor of y for the split — reads ds["y"], no featurization.
+    import numpy as np
+    return torch.as_tensor(np.asarray(_resolve_rows(train_ds)["y"], dtype="float32"))
 
 
 def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.10):
@@ -110,6 +128,7 @@ def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.1
     return {
         "train_ds": train_ds, "val_ds": val_ds, "test_ds": test_ds,
         "atom_vocab": atom_vocab, "k_X": len(atom_vocab), "k_E": 4,
+        "targets": tuple(d["targets"]),
         "train_smiles": _collect_train_smiles(train_ds),
         "test_smiles": _collect_train_smiles(test_ds) if n_test > 0 else [],
     }
@@ -120,7 +139,9 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
           save_path=None, save_every=0, push_repo=None, resume=True,
           grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
-          extra_features=None, rrwp_steps=12):
+          extra_features=None, rrwp_steps=12,
+          cond_cols=None, p_uncond=0.15, cond_emb=64):
+
     from dataset.torch_dataset import collate_dense
 
     # The local checkpoint path is implicit from push_repo unless given.
@@ -137,6 +158,11 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     train_ds, val_ds = sp["train_ds"], sp["val_ds"]
     atom_vocab, k_X, k_E = sp["atom_vocab"], sp["k_X"], sp["k_E"]
     train_smiles, test_smiles = sp["train_smiles"], sp["test_smiles"]
+
+    cond_idx = cond_dim = None
+    if cond_cols:
+        cond_idx = [sp["targets"].index(c) for c in cond_cols]
+        cond_dim = len(cond_idx)
 
     loader_gen = torch.Generator().manual_seed(seed)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -155,7 +181,14 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     if extra_features is not None:                         # needs max_n_nodes
         arch.update(extra_features=extra_features, rrwp_steps=rrwp_steps,
                     max_n_nodes=size_sampler.max_n)
+    if cond_dim:
+        arch.update(cond_dim=cond_dim, cond_emb=cond_emb)
     model = TimeConditionedGraphTransformer(k_X=k_X, k_E=k_E, **arch).to(device)
+    if cond_dim:                                           # z-score stats from train split
+        ytr = _collect_train_targets(train_ds)[:, cond_idx]
+        model.set_cond_stats(ytr.mean(0).to(device), ytr.std(0).to(device))
+        print(f"  conditioning on {cond_cols} (cols {cond_idx}); "
+              f"mean {ytr.mean(0).tolist()}, std {ytr.std(0).tolist()}")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None
@@ -178,7 +211,9 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                         optimizer=opt, scheduler=sched, epoch=epoch,
                         method=method_name,
                         extra={"dataset": dataset, "lambda_E": lambda_E,
-                               "seed": seed, "best_val": best_val})
+                               "seed": seed, "best_val": best_val,
+                               "cond_cols": list(cond_cols) if cond_cols else None,
+                               "p_uncond": p_uncond})
         msg = f"  {tag} saved -> {path} (epoch {epoch})"
         if push and push_repo:
             push_checkpoint_to_hf(path, push_repo,
@@ -215,13 +250,14 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                 start_epoch = int(ck["epoch"]) + 1
                 print(f"  resumed from {local} at epoch {start_epoch}")
 
+    keep = ("X", "E", "mask", "y") if cond_idx is not None else ("X", "E", "mask")
     step = len(history["step"])
     for epoch in range(start_epoch, epochs):
         for batch in train_loader:
-            batch = {k: v.to(device) for k, v in batch.items()
-                     if k in ("X", "E", "mask")}
+            batch = {k: v.to(device) for k, v in batch.items() if k in keep}
+            cond = _cond_from_batch(batch, cond_idx)
             comp = train_step(model, method, batch, opt, lambda_E=lambda_E,
-                              grad_clip=grad_clip)
+                              grad_clip=grad_clip, cond=cond, p_uncond=p_uncond)
             if ema is not None:
                 ema.update()
             history["step"].append(step)
@@ -237,7 +273,8 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                       f"lr {sched.get_last_lr()[0]:.2e}")
             step += 1
         sched.step()
-        val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema)
+        val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema,
+                             cond_idx=cond_idx)
         history["val_loss"].append(val_loss)
         print(f"epoch {epoch} done — val_loss {val_loss:.4f}")
         if save_path and val_loss < best_val:
