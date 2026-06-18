@@ -1,7 +1,6 @@
 import torch
 
 # Ported directly from DeFoG's 'rrwp' extra-features mode (RRWP + cycle counts).
-# Spectral (Laplacian eigen) features are omitted, as DeFoG does, for compute cost.
 
 # Graph-level cycle features: 3-, 4-, 5-, 6-cycles.
 Y_CYCLE_DIMS = 4
@@ -47,7 +46,7 @@ def _batch_diagonal(X):
 
 
 def _cycle_counts(A):
-    # Graph-level 3-6 cycle counts (bs,4); port of DeFoG KNodeCycles (y only).
+    # Graph-level 3-6 cycle counts (bs,4)
     A = A.float()
     d = A.sum(-1)
     k2 = A @ A
@@ -86,12 +85,11 @@ def _cycle_counts(A):
 
 
 def cycle_features(A):
-    # /10-scaled, clamped (matches DeFoG NodeCycleFeatures).
     return (_cycle_counts(A) / 10).clamp(max=1.0)
 
 
 def extra_graph_features(X, E, node_mask, k):
-    # RRWP node/edge + graph cycle feats; backbone prepends the node count to y.
+    # RRWP node/edge + graph cycle feats
     A = soft_adjacency(E)
     node, edge = rrwp_features(A, k)
     y_cyc = cycle_features(A)

@@ -281,11 +281,6 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class TimeConditionedGraphTransformer(nn.Module):
-    """Graph transformer backbone with time (and optional graph-size) injected
-    through the global `y` channel. Method-agnostic: the two output heads are
-    read as velocities by continuous FM (`fm_graph`) and as logits over clean
-    classes by discrete FM (`defog`)."""
-
     def __init__(self, k_X, k_E, n_layers=5, dx=256, de=64, dy=128, n_head=8,
                  dim_ffX=256, dim_ffE=128, dim_ffy=256, time_dim=128,
                  hidden_mlp_X=256, hidden_mlp_E=128, hidden_mlp_y=256,
