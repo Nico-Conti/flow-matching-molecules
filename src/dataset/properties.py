@@ -5,7 +5,8 @@ from rdkit.Chem import AllChem
 from .featurize import tensor_to_mol, largest_fragment, QM9_ATOMS
 
 PSI4_METHOD = "b3lyp/6-31G*"
-HARTREE_TO_EV = 27.211324570273  
+PYSCF_XC, PYSCF_BASIS = "b3lyp", "6-31g*"   
+HARTREE_TO_EV = 27.211324570273
 AU_TO_DEBYE = 2.5417464519
 
 
@@ -63,11 +64,37 @@ def psi4_properties(mol, method=PSI4_METHOD, optimize=False,
     return {"mu": mu, "homo": homo}
 
 
-def compute_targets(mol, **kw):
+def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False):
+
+    from pyscf import gto, dft
+    conf = mol.GetConformer()
+    atom = [(a.GetSymbol(), tuple(conf.GetAtomPosition(a.GetIdx())))
+            for a in mol.GetAtoms()]
+    try:
+        m = gto.M(atom=atom, basis=basis, charge=0, spin=0, unit="Angstrom", verbose=0)
+        mf = dft.RKS(m); mf.xc = xc
+        if optimize:                                   # needs `pip install geometric`
+            from pyscf.geomopt.geometric_solver import optimize as geom_opt
+            m = geom_opt(mf); mf = dft.RKS(m); mf.xc = xc
+        mf.kernel()
+        if not mf.converged:
+            return None
+        homo = float(mf.mo_energy[mf.mo_occ > 0][-1]) * HARTREE_TO_EV   # Hartree -> eV
+        mu = float(np.linalg.norm(mf.dip_moment(unit="Debye", verbose=0)))
+    except Exception:
+        return None
+    return {"mu": mu, "homo": homo}
+
+
+def compute_targets(mol, engine="pyscf", **kw):
     geom = embed_geometry(mol)
     if geom is None:
         return None
-    return psi4_properties(geom, **kw)
+    if engine == "pyscf":
+        return pyscf_properties(geom, **kw)
+    if engine == "psi4":
+        return psi4_properties(geom, **kw)
+    raise ValueError(f"unknown engine {engine!r}; expected 'pyscf' or 'psi4'")
 
 
 def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, **kw):
@@ -86,7 +113,7 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
     pairs = list(zip(graphs, y_targets))
     if progress:
         from tqdm.auto import tqdm
-        pairs = tqdm(pairs, desc="psi4", unit="mol")
+        pairs = tqdm(pairs, desc="dft", unit="mol")
 
     errs = {c: [] for c in target_cols}
     n_ok = 0

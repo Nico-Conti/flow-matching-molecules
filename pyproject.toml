@@ -23,7 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 
-eval = ["psi4"]
+eval = ["pyscf"]
+eval-opt = ["pyscf", "geometric"]
+eval-psi4 = ["psi4"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
