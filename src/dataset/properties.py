@@ -86,8 +86,8 @@ def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False):
     return {"mu": mu, "homo": homo}
 
 
-def compute_targets(mol, engine="pyscf", **kw):
-    geom = embed_geometry(mol)
+def compute_targets(mol, engine="pyscf", seed=0xC0FFEE, **kw):
+    geom = embed_geometry(mol, seed=seed)
     if geom is None:
         return None
     if engine == "pyscf":
@@ -97,16 +97,17 @@ def compute_targets(mol, engine="pyscf", **kw):
     raise ValueError(f"unknown engine {engine!r}; expected 'pyscf' or 'psi4'")
 
 
-def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, **kw):
+def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE, **kw):
     mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
     mol = largest_fragment(mol)
     if mol is None:
         return None
-    return compute_targets(mol, **kw)
+    return compute_targets(mol, seed=seed, **kw)
 
 
 def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
-                 atom_vocab=QM9_ATOMS, repair=False, progress=False, **kw):
+                 atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE,
+                 progress=False, **kw):
     # y_targets: [N, len(target_cols)] conditioning values, column-aligned to
     # target_cols. Molecules that fail to decode/embed/converge are skipped.
     y_targets = np.asarray(y_targets, dtype="float64")
@@ -118,7 +119,8 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
     errs = {c: [] for c in target_cols}
     n_ok = 0
     for (X, E), y in pairs:
-        props = targets_from_graph(X, E, atom_vocab=atom_vocab, repair=repair, **kw)
+        props = targets_from_graph(X, E, atom_vocab=atom_vocab, repair=repair,
+                                   seed=seed, **kw)
         if props is None:
             continue
         n_ok += 1

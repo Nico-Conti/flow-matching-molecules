@@ -108,8 +108,8 @@ def _step_probs(R, zt_label, dt):
 
 @torch.no_grad()
 def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
-           eta=0.0, distortion="identity", cond=None, w=0.0, **_):
-    # cond: (bs, cond_dim) targets; w: CFG weight (logit-space combine).
+           eta=0.0, distortion="identity", cond=None, s=0.0, **_):
+    # cond: (bs, cond_dim) targets; s: guidance scale (logit-space combine, FreeGress s).
     model.eval()
     f = DISTORTIONS[distortion]
     bs = len(n_list)
@@ -123,17 +123,18 @@ def sample(model, n_list, k_X, k_E, steps=100, device="cpu",
     probE = torch.full((bs, n, n, k_E), p0E, device=device)
     X, E = _sample_discrete(probX, probE, node_mask)           # z_0 ~ uniform
 
-    guided = cond is not None and w != 0.0
+    # s = FreeGress guidance scale (= Ho&Salimans w + 1); s=1 conditional, s>1 over-guidance
+    guided = cond is not None
     for i in range(steps):
         t = f(i / steps)               # f operates on Python floats (float64)
-        s = f((i + 1) / steps)
-        dt = s - t
+        t_next = f((i + 1) / steps)
+        dt = t_next - t
         tt = torch.full((bs,), t, device=device)
         if guided:                                             # logit-space CFG combine
             logX_c, logE_c = model(X, E, tt, node_mask, cond=cond)
             logX_0, logE_0 = model(X, E, tt, node_mask, cond=None)
-            logX = logX_0 + w * (logX_c - logX_0)
-            logE = logE_0 + w * (logE_c - logE_0)
+            logX = logX_0 + s * (logX_c - logX_0)
+            logE = logE_0 + s * (logE_c - logE_0)
         else:
             logX, logE = model(X, E, tt, node_mask, cond=cond)
         phatX = F.softmax(logX, dim=-1)
@@ -162,6 +163,6 @@ class DeFoG:
         return defog_loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
 
     def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu",
-               eta=0.0, distortion="identity", cond=None, w=0.0, **kw):
+               eta=0.0, distortion="identity", cond=None, s=0.0, **kw):
         return sample(model, n_list, k_X, k_E, steps=steps, device=device,
-                      eta=eta, distortion=distortion, cond=cond, w=w)
+                      eta=eta, distortion=distortion, cond=cond, s=s)

@@ -57,7 +57,7 @@ def fm_loss(model, batch, lambda_E=1.0, cond=None, p_uncond=0.0):
 
 @torch.no_grad()
 def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu",
-           cond=None, w=0.0):
+           cond=None, s=0.0):
     
     model.eval()
     bs = len(n_list)
@@ -71,16 +71,17 @@ def sample(model, n_list, k_X, k_E, steps=100, t_end=1.0, device="cpu",
     E = 0.5 * (E + E.transpose(1, 2))
     X, E = mask_graph(X, E, node_mask)
 
-    guided = cond is not None and w != 0.0
+    # s = FreeGress guidance scale (= Ho&Salimans w + 1); s=1 conditional, s>1 over-guidance
+    guided = cond is not None
     ts = torch.linspace(0, t_end, steps + 1, device=device)
     for i in range(steps):
         t = ts[i].expand(bs)
         dt = ts[i + 1] - ts[i]
-        if guided:                                      # v_∅ + w (v_c − v_∅)
+        if guided:                                      # v_∅ + s (v_c − v_∅)
             vX_c, vE_c = model(X, E, t, node_mask, cond=cond)
             vX_0, vE_0 = model(X, E, t, node_mask, cond=None)
-            vX = vX_0 + w * (vX_c - vX_0)
-            vE = vE_0 + w * (vE_c - vE_0)
+            vX = vX_0 + s * (vX_c - vX_0)
+            vE = vE_0 + s * (vE_c - vE_0)
         else:
             vX, vE = model(X, E, t, node_mask, cond=cond)
         X = X + dt * vX
@@ -102,6 +103,6 @@ class FMGraph:
         return fm_loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
 
     def sample(self, model, n_list, k_X, k_E, steps=100, device="cpu", t_end=1.0,
-               cond=None, w=0.0, **kw):
+               cond=None, s=0.0, **kw):
         return sample(model, n_list, k_X, k_E, steps=steps, t_end=t_end,
-                      device=device, cond=cond, w=w)
+                      device=device, cond=cond, s=s)
