@@ -54,7 +54,7 @@ def psi4_properties(mol, method=PSI4_METHOD, optimize=False,
         _, wfn = psi4.energy(method, molecule=geom, return_wfn=True)
     except Exception:
         psi4.core.clean()
-        return None
+        return "dft_error"
 
     eps = np.asarray(wfn.epsilon_a().to_array())
     homo = float(eps[wfn.nalpha() - 1]) * HARTREE_TO_EV  # nalpha = n doubly-occ
@@ -76,6 +76,10 @@ def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False, auto_s
         spin = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())   # 2S, not multiplicity
     else:
         charge, spin = 0, 0
+
+    n_elec = sum(a.GetAtomicNum() for a in mol.GetAtoms()) - charge
+    if (n_elec - spin) % 2:                            # charge/spin can't form this electron count
+        return "parity"
     try:
         m = gto.M(atom=atom, basis=basis, charge=charge, spin=spin,
                   unit="Angstrom", verbose=0)
@@ -85,22 +89,22 @@ def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False, auto_s
             from pyscf.geomopt.geometric_solver import optimize as geom_opt
             m = geom_opt(mf); mf = ks(m); mf.xc = xc
         mf.kernel()
-        if not mf.converged:
-            return None
-        occ, eps = mf.mo_occ, mf.mo_energy
-        if spin:                                       # UKS: alpha HOMO (matches FreeGress)
-            occ, eps = occ[0], eps[0]
-        homo = float(eps[occ > 0][-1]) * HARTREE_TO_EV   # Hartree -> eV
-        mu = float(np.linalg.norm(mf.dip_moment(unit="Debye", verbose=0)))
     except Exception:
-        return None
+        return "dft_error"
+    if not mf.converged:
+        return "not_converged"
+    occ, eps = mf.mo_occ, mf.mo_energy
+    if spin:                                           # UKS: alpha HOMO (matches FreeGress)
+        occ, eps = occ[0], eps[0]
+    homo = float(eps[occ > 0][-1]) * HARTREE_TO_EV     # Hartree -> eV
+    mu = float(np.linalg.norm(mf.dip_moment(unit="Debye", verbose=0)))
     return {"mu": mu, "homo": homo}
 
 
 def compute_targets(mol, engine="pyscf", seed=0xC0FFEE, **kw):
     geom = embed_geometry(mol, seed=seed)
     if geom is None:
-        return None
+        return "embed"
     if engine == "pyscf":
         return pyscf_properties(geom, **kw)
     if engine == "psi4":
@@ -112,7 +116,7 @@ def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE, 
     mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
     mol = largest_fragment(mol)
     if mol is None:
-        return None
+        return "decode"
     return compute_targets(mol, seed=seed, **kw)
 
 
@@ -120,7 +124,9 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
                  atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE,
                  progress=False, **kw):
     # y_targets: [N, len(target_cols)] conditioning values, column-aligned to
-    # target_cols. Molecules that fail to decode/embed/converge are skipped.
+    # target_cols. Failures are skipped and tallied by reason in out["failures"]:
+    # decode / embed / parity / not_converged / dft_error.
+    from collections import Counter
     y_targets = np.asarray(y_targets, dtype="float64")
     pairs = list(zip(graphs, y_targets))
     if progress:
@@ -128,11 +134,13 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
         pairs = tqdm(pairs, desc="dft", unit="mol")
 
     errs = {c: [] for c in target_cols}
+    fails = Counter()
     n_ok = 0
     for (X, E), y in pairs:
         props = targets_from_graph(X, E, atom_vocab=atom_vocab, repair=repair,
                                    seed=seed, **kw)
-        if props is None:
+        if not isinstance(props, dict):
+            fails[props] += 1
             continue
         n_ok += 1
         for j, c in enumerate(target_cols):
@@ -143,4 +151,5 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
     out["n_evaluated"] = n_ok
     out["n_total"] = len(graphs)
     out["coverage"] = n_ok / len(graphs) if graphs else 0.0
+    out["failures"] = dict(fails)
     return out
