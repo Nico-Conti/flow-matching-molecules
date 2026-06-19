@@ -64,22 +64,33 @@ def psi4_properties(mol, method=PSI4_METHOD, optimize=False,
     return {"mu": mu, "homo": homo}
 
 
-def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False):
-
+def pyscf_properties(mol, xc=PYSCF_XC, basis=PYSCF_BASIS, optimize=False, auto_spin=True):
+    # auto_spin=True (default, FreeGress-like): actual charge + spin=2S (=Nα−Nβ), UKS if open-shell.
+    # auto_spin=False: force neutral closed-shell singlet RKS (QM9 convention).
     from pyscf import gto, dft
     conf = mol.GetConformer()
     atom = [(a.GetSymbol(), tuple(conf.GetAtomPosition(a.GetIdx())))
             for a in mol.GetAtoms()]
+    if auto_spin:
+        charge = Chem.GetFormalCharge(mol)
+        spin = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())   # 2S, not multiplicity
+    else:
+        charge, spin = 0, 0
     try:
-        m = gto.M(atom=atom, basis=basis, charge=0, spin=0, unit="Angstrom", verbose=0)
-        mf = dft.RKS(m); mf.xc = xc
+        m = gto.M(atom=atom, basis=basis, charge=charge, spin=spin,
+                  unit="Angstrom", verbose=0)
+        ks = dft.UKS if spin else dft.RKS
+        mf = ks(m); mf.xc = xc
         if optimize:                                   # needs `pip install geometric`
             from pyscf.geomopt.geometric_solver import optimize as geom_opt
-            m = geom_opt(mf); mf = dft.RKS(m); mf.xc = xc
+            m = geom_opt(mf); mf = ks(m); mf.xc = xc
         mf.kernel()
         if not mf.converged:
             return None
-        homo = float(mf.mo_energy[mf.mo_occ > 0][-1]) * HARTREE_TO_EV   # Hartree -> eV
+        occ, eps = mf.mo_occ, mf.mo_energy
+        if spin:                                       # UKS: alpha HOMO (matches FreeGress)
+            occ, eps = occ[0], eps[0]
+        homo = float(eps[occ > 0][-1]) * HARTREE_TO_EV   # Hartree -> eV
         mu = float(np.linalg.norm(mf.dip_moment(unit="Debye", verbose=0)))
     except Exception:
         return None
