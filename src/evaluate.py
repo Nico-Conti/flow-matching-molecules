@@ -62,6 +62,7 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
 def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targets,
                                 cond_cols=("homo",), s_list=(0.0, 1.0, 3.0, 5.0),
                                 n_per_target=10, steps=100, t_end=1.0, device="cpu",
+                                eta=0.0, distortion="identity",
                                 method="fm_graph", repair=False, seed=None,
                                 optimize=False, progress=True):
 
@@ -79,7 +80,8 @@ def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targe
             n_list = size_sampler.sample(n_per_target)
             cond = tvec.view(1, -1).repeat(n_per_target, 1).to(device)
             Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
-                                           t_end=t_end, device=device, cond=cond, s=s)
+                                           t_end=t_end, device=device, cond=cond, s=s,
+                                           eta=eta, distortion=distortion)
             graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
             ys.extend([tvec.tolist()] * n_per_target)
         mae = property_mae(graphs, ys, target_cols=tuple(cond_cols),
