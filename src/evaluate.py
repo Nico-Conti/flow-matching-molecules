@@ -62,7 +62,7 @@ def evaluate(model, size_sampler, train_smiles, atom_vocab, k_X, k_E,
 def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targets,
                                 cond_cols=("homo",), s_list=(0.0, 1.0, 3.0, 5.0),
                                 n_per_target=10, steps=100, t_end=1.0, device="cpu",
-                                eta=0.0, distortion="identity",
+                                eta=0.0, distortion="identity", batch=256,
                                 method="fm_graph", repair=False, seed=None,
                                 optimize=False, progress=True):
 
@@ -71,19 +71,23 @@ def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targe
         method = get_method(method)
     targets = torch.as_tensor(targets, dtype=torch.float32).view(-1, len(cond_cols))
 
+
+    reps = targets.repeat_interleave(n_per_target, dim=0)
+    ys = reps.tolist()
+    N = reps.shape[0]
+
     results = {}
     for s in s_list:
         if seed is not None:
             set_seed(seed)
-        graphs, ys = [], []
-        for tvec in targets:
-            n_list = size_sampler.sample(n_per_target)
-            cond = tvec.view(1, -1).repeat(n_per_target, 1).to(device)
+        graphs = []
+        for start in range(0, N, batch):
+            cond = reps[start:start + batch].to(device)
+            n_list = size_sampler.sample(cond.shape[0])
             Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
                                            t_end=t_end, device=device, cond=cond, s=s,
                                            eta=eta, distortion=distortion)
             graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
-            ys.extend([tvec.tolist()] * n_per_target)
         mae = property_mae(graphs, ys, target_cols=tuple(cond_cols),
                            atom_vocab=atom_vocab, repair=repair,
                            optimize=optimize, progress=progress)
