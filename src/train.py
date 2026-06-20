@@ -139,7 +139,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
           save_path=None, save_every=0, push_repo=None, resume=True,
           grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
-          extra_features=None, rrwp_steps=12,
+          extra_features=None, rrwp_steps=12, dy=None,
           cond_cols=None, p_uncond=0.15, cond_emb=64):
 
     from dataset.torch_dataset import collate_dense
@@ -178,6 +178,8 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     method = get_method(method_name)
 
     arch = {} if n_layers is None else {"n_layers": n_layers}
+    if dy is not None:                                     # global-stream width (cond + time + extra)
+        arch["dy"] = dy
     if extra_features is not None:                         # needs max_n_nodes
         arch.update(extra_features=extra_features, rrwp_steps=rrwp_steps,
                     max_n_nodes=size_sampler.max_n)
