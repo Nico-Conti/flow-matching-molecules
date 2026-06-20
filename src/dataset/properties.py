@@ -1,8 +1,14 @@
+from collections import Counter
+
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Crippen, QED
 
-from .featurize import tensor_to_mol, largest_fragment, QM9_ATOMS
+from .featurize import tensor_to_mol, largest_fragment, QM9_ATOMS, ZINC_ATOMS
+
+
+RDKIT_FNS = {"logP": Crippen.MolLogP, "qed": QED.qed}
+DFT_PROPS = ("mu", "homo")
 
 PSI4_METHOD = "b3lyp/6-31G*"
 PYSCF_XC, PYSCF_BASIS = "b3lyp", "6-31g*"   
@@ -120,25 +126,18 @@ def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE, 
     return compute_targets(mol, seed=seed, **kw)
 
 
-def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
-                 atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE,
-                 progress=False, **kw):
-    # y_targets: [N, len(target_cols)] conditioning values, column-aligned to
-    # target_cols. Failures are skipped and tallied by reason in out["failures"]:
-    # decode / embed / parity / not_converged / dft_error.
-    from collections import Counter
+def _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress):
     y_targets = np.asarray(y_targets, dtype="float64")
     pairs = list(zip(graphs, y_targets))
     if progress:
         from tqdm.auto import tqdm
-        pairs = tqdm(pairs, desc="dft", unit="mol")
+        pairs = tqdm(pairs, desc=desc, unit="mol")
 
     errs = {c: [] for c in target_cols}
     fails = Counter()
     n_ok = 0
     for (X, E), y in pairs:
-        props = targets_from_graph(X, E, atom_vocab=atom_vocab, repair=repair,
-                                   seed=seed, **kw)
+        props = score_one(X, E)
         if not isinstance(props, dict):
             fails[props] += 1
             continue
@@ -153,3 +152,35 @@ def property_mae(graphs, y_targets, target_cols=("mu", "homo"),
     out["coverage"] = n_ok / len(graphs) if graphs else 0.0
     out["failures"] = dict(fails)
     return out
+
+
+def property_mae(graphs, y_targets, target_cols=("homo",),
+                 atom_vocab=QM9_ATOMS, repair=False, seed=1,
+                 progress=False, **dft_kw):
+    unknown = [c for c in target_cols if c not in RDKIT_FNS and c not in DFT_PROPS]
+    if unknown:
+        raise ValueError(f"unknown target columns {unknown}; "
+                         f"known: {tuple(RDKIT_FNS) + DFT_PROPS}")
+    needs_dft = any(c in DFT_PROPS for c in target_cols)
+
+    def score_one(X, E):
+        mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
+        mol = largest_fragment(mol)
+        if mol is None:
+            return "decode"
+        out = {}
+        try:
+            for c in target_cols:
+                if c in RDKIT_FNS:
+                    out[c] = float(RDKIT_FNS[c](mol))
+        except Exception:
+            return "prop_error"
+        if needs_dft:
+            props = compute_targets(mol, seed=seed, **dft_kw)   # dict or failure str
+            if not isinstance(props, dict):
+                return props
+            out.update({c: props[c] for c in target_cols if c in DFT_PROPS})
+        return out
+
+    desc = "dft" if needs_dft else "rdkit"
+    return _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress)

@@ -85,8 +85,8 @@ def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targe
             graphs.extend(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()))
             ys.extend([tvec.tolist()] * n_per_target)
         mae = property_mae(graphs, ys, target_cols=tuple(cond_cols),
-                           atom_vocab=atom_vocab, repair=repair, optimize=optimize,
-                           progress=progress)
+                           atom_vocab=atom_vocab, repair=repair,
+                           optimize=optimize, progress=progress)
         results[s] = mae
         print(f"s={s}: {mae}")
     return results
