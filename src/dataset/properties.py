@@ -4,7 +4,8 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, Crippen, QED
 
-from .featurize import tensor_to_mol, largest_fragment, QM9_ATOMS, ZINC_ATOMS
+from .featurize import (tensor_to_mol, build_mol_partial_charges,
+                        largest_fragment, QM9_ATOMS, ZINC_ATOMS)
 
 
 RDKIT_FNS = {"logP": Crippen.MolLogP, "qed": QED.qed}
@@ -155,7 +156,7 @@ def _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress):
 
 
 def property_mae(graphs, y_targets, target_cols=("homo",),
-                 atom_vocab=QM9_ATOMS, repair=False, seed=1,
+                 atom_vocab=QM9_ATOMS, repair=False, partial_charges=False, seed=1,
                  progress=False, **dft_kw):
     unknown = [c for c in target_cols if c not in RDKIT_FNS and c not in DFT_PROPS]
     if unknown:
@@ -163,9 +164,14 @@ def property_mae(graphs, y_targets, target_cols=("homo",),
                          f"known: {tuple(RDKIT_FNS) + DFT_PROPS}")
     needs_dft = any(c in DFT_PROPS for c in target_cols)
 
-    def score_one(X, E):
+    def decode(X, E):   # match the decoder the model was evaluated with (ZINC: partial charges)
+        if partial_charges:
+            return build_mol_partial_charges(X, E, atom_vocab=atom_vocab)
         mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
-        mol = largest_fragment(mol)
+        return mol
+
+    def score_one(X, E):
+        mol = largest_fragment(decode(X, E))
         if mol is None:
             return "decode"
         out = {}
