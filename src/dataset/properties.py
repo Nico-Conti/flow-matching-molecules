@@ -1,3 +1,4 @@
+import os
 from collections import Counter
 
 import numpy as np
@@ -127,18 +128,67 @@ def targets_from_graph(X, E, atom_vocab=QM9_ATOMS, repair=False, seed=0xC0FFEE, 
     return compute_targets(mol, seed=seed, **kw)
 
 
-def _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress):
+def _score_one(graph, cfg):
+    # top-level (picklable) so it can run in a worker process. cfg holds the
+    # decode/score config; returns a props dict or a failure-reason string.
+    X, E = graph
+    if cfg["partial_charges"]:
+        mol = build_mol_partial_charges(X, E, atom_vocab=cfg["atom_vocab"])
+    else:
+        mol, _ = tensor_to_mol(X, E, atom_vocab=cfg["atom_vocab"], repair=cfg["repair"])
+    mol = largest_fragment(mol)
+    if mol is None:
+        return "decode"
+    out = {}
+    try:
+        for c in cfg["target_cols"]:
+            if c in RDKIT_FNS:
+                out[c] = float(RDKIT_FNS[c](mol))
+    except Exception:
+        return "prop_error"
+    if cfg["needs_dft"]:
+        props = compute_targets(mol, seed=cfg["seed"], **cfg["dft_kw"])  # dict or failure str
+        if not isinstance(props, dict):
+            return props
+        out.update({c: props[c] for c in cfg["target_cols"] if c in DFT_PROPS})
+    return out
+
+
+def _worker_init():
+    # one DFT thread per worker so N processes don't oversubscribe the cores.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    try:
+        from pyscf import lib
+        lib.num_threads(1)
+    except Exception:
+        pass
+
+
+def _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs=1):
     y_targets = np.asarray(y_targets, dtype="float64")
-    pairs = list(zip(graphs, y_targets))
-    if progress:
-        from tqdm.auto import tqdm
-        pairs = tqdm(pairs, desc=desc, unit="mol")
+    n = len(graphs)
+
+    if n_jobs > 1 and cfg["needs_dft"]:        # parallel DFT (independent per molecule)
+        import functools, multiprocessing as mp
+        worker = functools.partial(_score_one, cfg=cfg)
+        with mp.get_context("fork").Pool(n_jobs, initializer=_worker_init) as pool:
+            it = pool.imap(worker, graphs, chunksize=1)   # imap preserves order
+            if progress:
+                from tqdm.auto import tqdm
+                it = tqdm(it, total=n, desc=desc, unit="mol")
+            props_list = list(it)
+    else:
+        it = graphs
+        if progress:
+            from tqdm.auto import tqdm
+            it = tqdm(graphs, total=n, desc=desc, unit="mol")
+        props_list = [_score_one(g, cfg) for g in it]
 
     errs = {c: [] for c in target_cols}
     fails = Counter()
     n_ok = 0
-    for (X, E), y in pairs:
-        props = score_one(X, E)
+    for props, y in zip(props_list, y_targets):
         if not isinstance(props, dict):
             fails[props] += 1
             continue
@@ -149,44 +199,25 @@ def _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress):
     out = {f"mae_{c}": (float(np.mean(errs[c])) if errs[c] else float("nan"))
            for c in target_cols}
     out["n_evaluated"] = n_ok
-    out["n_total"] = len(graphs)
-    out["coverage"] = n_ok / len(graphs) if graphs else 0.0
+    out["n_total"] = n
+    out["coverage"] = n_ok / n if graphs else 0.0
     out["failures"] = dict(fails)
     return out
 
 
 def property_mae(graphs, y_targets, target_cols=("homo",),
                  atom_vocab=QM9_ATOMS, repair=False, partial_charges=False, seed=1,
-                 progress=False, **dft_kw):
+                 progress=False, n_jobs=None, **dft_kw):
     unknown = [c for c in target_cols if c not in RDKIT_FNS and c not in DFT_PROPS]
     if unknown:
         raise ValueError(f"unknown target columns {unknown}; "
                          f"known: {tuple(RDKIT_FNS) + DFT_PROPS}")
     needs_dft = any(c in DFT_PROPS for c in target_cols)
+    if n_jobs is None:                         # env knob: DFT_JOBS=64 ... (1 = serial)
+        n_jobs = int(os.environ.get("DFT_JOBS", "1"))
 
-    def decode(X, E):   # match the decoder the model was evaluated with (ZINC: partial charges)
-        if partial_charges:
-            return build_mol_partial_charges(X, E, atom_vocab=atom_vocab)
-        mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=repair)
-        return mol
-
-    def score_one(X, E):
-        mol = largest_fragment(decode(X, E))
-        if mol is None:
-            return "decode"
-        out = {}
-        try:
-            for c in target_cols:
-                if c in RDKIT_FNS:
-                    out[c] = float(RDKIT_FNS[c](mol))
-        except Exception:
-            return "prop_error"
-        if needs_dft:
-            props = compute_targets(mol, seed=seed, **dft_kw)   # dict or failure str
-            if not isinstance(props, dict):
-                return props
-            out.update({c: props[c] for c in target_cols if c in DFT_PROPS})
-        return out
-
+    cfg = {"target_cols": tuple(target_cols), "atom_vocab": atom_vocab,
+           "repair": repair, "partial_charges": partial_charges,
+           "needs_dft": needs_dft, "seed": seed, "dft_kw": dft_kw}
     desc = "dft" if needs_dft else "rdkit"
-    return _mae_over_graphs(graphs, y_targets, target_cols, score_one, desc, progress)
+    return _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs)
