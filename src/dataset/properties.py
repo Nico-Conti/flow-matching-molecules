@@ -154,10 +154,19 @@ def _score_one(graph, cfg):
     return out
 
 
+_blas_limiter = None
+
+
 def _worker_init():
-    # one DFT thread per worker so N processes don't oversubscribe the cores.
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
+    for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS"):
+        os.environ[v] = "1"
+    global _blas_limiter
+    try:                          
+        from threadpoolctl import threadpool_limits
+        _blas_limiter = threadpool_limits(limits=1)
+    except Exception:
+        pass
     try:
         from pyscf import lib
         lib.num_threads(1)
