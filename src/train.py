@@ -103,6 +103,39 @@ def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.1
     from dataset.torch_dataset import MoleculeDataset
 
     g = torch.Generator().manual_seed(seed)
+
+    # Datasets with official train/(valid)/test splits: train on `train` (carve val when no
+    # official val exists), evaluate on the official `test`. Never random-re-split these —
+    # it would leak test molecules into train and break FCD comparability.
+    if dataset in ("moses", "guacamol"):
+        if dataset == "moses":
+            from dataset.moses import load_moses
+            _load = load_moses
+            d, d_val = _load(split="train"), None      # MOSES ships no val; carve from train
+        else:
+            from dataset.guacamol import load_guacamol
+            _load = load_guacamol
+            d, d_val = _load(split="train"), _load(split="valid")   # GuacaMol ships a val
+        d_test = _load(split="test")
+        atom_vocab = d["atom_vocab"]
+        train_full = MoleculeDataset.from_loader(d)
+        if subset is not None:
+            keep = min(subset, len(train_full))
+            train_full, _ = random_split(train_full, [keep, len(train_full) - keep], generator=g)
+        if d_val is not None and subset is None:
+            train_ds, val_ds = train_full, MoleculeDataset.from_loader(d_val)
+        else:
+            n_val = max(1, int(len(train_full) * val_frac))
+            train_ds, val_ds = random_split(train_full, [len(train_full) - n_val, n_val], generator=g)
+        return {
+            "train_ds": train_ds, "val_ds": val_ds,
+            "test_ds": MoleculeDataset.from_loader(d_test),
+            "atom_vocab": atom_vocab, "k_X": len(atom_vocab), "k_E": d.get("n_bond_classes", 4),
+            "targets": tuple(d["targets"]),
+            "train_smiles": _collect_train_smiles(train_ds),
+            "test_smiles": list(d_test["ds"]["smiles"]),
+        }
+
     if dataset == "qm9":
         from dataset.qm9 import load_qm9
         d = load_qm9()
@@ -110,7 +143,7 @@ def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.1
         from dataset.zinc import load_zinc
         d = load_zinc()
     else:
-        raise ValueError(f"unknown dataset {dataset!r}; expected 'qm9' or 'zinc'")
+        raise ValueError(f"unknown dataset {dataset!r}; expected 'qm9', 'zinc', 'moses', or 'guacamol'")
     full = MoleculeDataset.from_loader(d)
     atom_vocab = d["atom_vocab"]
 
@@ -127,7 +160,7 @@ def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.1
 
     return {
         "train_ds": train_ds, "val_ds": val_ds, "test_ds": test_ds,
-        "atom_vocab": atom_vocab, "k_X": len(atom_vocab), "k_E": 4,
+        "atom_vocab": atom_vocab, "k_X": len(atom_vocab), "k_E": d.get("n_bond_classes", 4),
         "targets": tuple(d["targets"]),
         "train_smiles": _collect_train_smiles(train_ds),
         "test_smiles": _collect_train_smiles(test_ds) if n_test > 0 else [],

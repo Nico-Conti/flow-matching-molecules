@@ -31,7 +31,8 @@ def sanitize_smiles_dataset(smiles_list, atom_vocab, charge_aware=True,
             stats["drop_sanitize"] += 1
             continue
         try:
-            X, E = smiles_to_tensor(s_clean, atom_vocab=atom_vocab, charge_aware=charge_aware)
+            X, E = smiles_to_tensor(s_clean, atom_vocab=atom_vocab,
+                                    charge_aware=charge_aware)
         except ValueError:
             stats["drop_vocab"] += 1
             continue

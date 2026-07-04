@@ -157,16 +157,21 @@ def _score_one(graph, cfg):
 _blas_limiter = None
 
 
+def _single_thread_blas():
+    try:
+        from threadpoolctl import threadpool_limits
+        return threadpool_limits(limits=1)
+    except Exception:
+        from contextlib import nullcontext
+        return nullcontext()
+
+
 def _worker_init():
     for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
               "NUMEXPR_NUM_THREADS"):
         os.environ[v] = "1"
     global _blas_limiter
-    try:                          
-        from threadpoolctl import threadpool_limits
-        _blas_limiter = threadpool_limits(limits=1)
-    except Exception:
-        pass
+    _blas_limiter = _single_thread_blas()
     try:
         from pyscf import lib
         lib.num_threads(1)
@@ -178,11 +183,11 @@ def _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs
     y_targets = np.asarray(y_targets, dtype="float64")
     n = len(graphs)
 
-    if n_jobs > 1 and cfg["needs_dft"]:        # parallel DFT (independent per molecule)
+    if n_jobs > 1 and cfg["needs_dft"]:
         import functools, multiprocessing as mp
         worker = functools.partial(_score_one, cfg=cfg)
-        with mp.get_context("fork").Pool(n_jobs, initializer=_worker_init) as pool:
-            it = pool.imap(worker, graphs, chunksize=1)   # imap preserves order
+        with _single_thread_blas(), mp.get_context("fork").Pool(n_jobs, initializer=_worker_init) as pool:
+            it = pool.imap(worker, graphs, chunksize=1)
             if progress:
                 from tqdm.auto import tqdm
                 it = tqdm(it, total=n, desc=desc, unit="mol")
