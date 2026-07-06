@@ -285,7 +285,10 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
     # else (optimizer, EMA, checkpoint, validation) keeps using the unwrapped `model`.
     ddp_model = model
     if distributed:
-        ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+        # find_unused_parameters: the model discards the global-y output (forward returns
+        # only outX, outE), so the last layer's y-path + mlp_out_y receive no gradient.
+        ddp_model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[rank], find_unused_parameters=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
