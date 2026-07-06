@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 
 import torch
@@ -167,22 +168,79 @@ def build_split(dataset="qm9", subset=None, seed=0, val_frac=0.15, test_frac=0.1
     }
 
 
-def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
-          ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
-          seed=0, device=None, subset=None, log_every=50, dataset="qm9",
-          save_path=None, save_every=0, push_repo=None, resume=True,
-          grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
-          extra_features=None, rrwp_steps=12, dy=None,
-          cond_cols=None, p_uncond=0.15, cond_emb=64):
+def train(devices=1, **hparams):
+    """Train a model and return it. Hyperparameters are keyword arguments forwarded
+    to `_train` (see it for the full list and defaults), e.g.
+    train(dataset="moses", method="defog", epochs=300, batch_size=128).
+
+    devices > 1 data-parallelizes across that many GPUs on one node: one worker
+    process per GPU, gradients averaged automatically by DDP. A multi-GPU run's
+    output is the rank-0 checkpoint (save_path / push_repo); train() returns None.
+    """
+    if devices > 1:
+        torch.multiprocessing.spawn(_spawn_entry, args=(devices, hparams), nprocs=devices)
+        return None
+    return _train(rank=0, world_size=1, **hparams)
+
+
+def _spawn_entry(rank, world_size, hparams):
+    # mp.spawn passes args positionally and can't unpack a dict into **hparams, so
+    # this thin wrapper does the unpacking for the spawned worker.
+    _train(rank, world_size, **hparams)
+
+
+def _ddp_setup(rank, world_size):
+    # Join this worker to the process group and bind it to its own GPU.
+    import torch.distributed as dist
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+    return torch.device(f"cuda:{rank}")
+
+
+def _make_train_loader(train_ds, batch_size, seed, rank, world_size):
+    # Under DDP each rank trains on a disjoint shard (DistributedSampler); on a single
+    # process we just shuffle. Returns (loader, sampler); sampler is None off-DDP.
+    from dataset.torch_dataset import collate_dense
+    if world_size > 1:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank,
+                                     shuffle=True, seed=seed)
+        loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler,
+                            collate_fn=collate_dense)
+        return loader, sampler
+    gen = torch.Generator().manual_seed(seed)
+    loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                        collate_fn=collate_dense, generator=gen)
+    return loader, None
+
+
+def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12,
+           lambda_E=1.0, ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
+           seed=0, device=None, subset=None, log_every=50, dataset="qm9",
+           save_path=None, save_every=0, push_repo=None, resume=True,
+           grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
+           extra_features=None, rrwp_steps=12, dy=None,
+           cond_cols=None, p_uncond=0.15, cond_emb=64):
 
     from dataset.torch_dataset import collate_dense
+
+    distributed = world_size > 1
+    is_main = rank == 0
+    def log(*a, **k):                        # only the main rank writes to stdout
+        if is_main:
+            print(*a, **k)
+
+    if distributed:
+        device = _ddp_setup(rank, world_size)
+    else:
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     # The local checkpoint path is implicit from push_repo unless given.
     if save_path is None and push_repo is not None:
         from checkpoint import repo_to_path
         save_path = repo_to_path(push_repo)
-
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     set_seed(seed, deterministic=deterministic)
 
@@ -197,9 +255,7 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
         cond_idx = [sp["targets"].index(c) for c in cond_cols]
         cond_dim = len(cond_idx)
 
-    loader_gen = torch.Generator().manual_seed(seed)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_dense, generator=loader_gen)
+    train_loader, train_sampler = _make_train_loader(train_ds, batch_size, seed, rank, world_size)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_dense)
 
@@ -222,8 +278,15 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
     if cond_dim:                                           # z-score stats from train split
         ytr = _collect_train_targets(train_ds)[:, cond_idx]
         model.set_cond_stats(ytr.mean(0).to(device), ytr.std(0).to(device))
-        print(f"  conditioning on {cond_cols} (cols {cond_idx}); "
-              f"mean {ytr.mean(0).tolist()}, std {ytr.std(0).tolist()}")
+        log(f"  conditioning on {cond_cols} (cols {cond_idx}); "
+            f"mean {ytr.mean(0).tolist()}, std {ytr.std(0).tolist()}")
+
+    # ddp_model wraps `model` so backward() averages gradients across ranks; everything
+    # else (optimizer, EMA, checkpoint, validation) keeps using the unwrapped `model`.
+    ddp_model = model
+    if distributed:
+        ddp_model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None
@@ -256,15 +319,22 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
             msg += f" + pushed to {push_repo}"
         print(msg)
 
-    # Auto-resume: restore live weights, EMA, optimizer, scheduler, epoch, RNG.
+    # Auto-resume: restore live weights, EMA, optimizer, scheduler, epoch, RNG. All ranks
+    # load the same checkpoint; the main rank warms the (shared) HF cache first so the
+    # ranks don't race the download.
     start_epoch = 0
     if resume and save_path:
         from checkpoint import resolve_checkpoint
+        if distributed:
+            import torch.distributed as dist
+            if is_main:
+                resolve_checkpoint(save_path, push_repo)
+            dist.barrier()
         local = resolve_checkpoint(save_path, push_repo)
         if local is not None:
             ck = torch.load(local, map_location=device, weights_only=False)
             if ck.get("optimizer") is None or ck.get("epoch") is None:
-                print(f"  found {local} but it is not resumable; starting fresh")
+                log(f"  found {local} but it is not resumable; starting fresh")
             else:
                 model.load_state_dict(ck["state_dict"])
                 if ema is not None and ck.get("ema_shadow") is not None:
@@ -283,15 +353,17 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
                     except Exception:
                         pass
                 start_epoch = int(ck["epoch"]) + 1
-                print(f"  resumed from {local} at epoch {start_epoch}")
+                log(f"  resumed from {local} at epoch {start_epoch}")
 
     keep = ("X", "E", "mask", "y") if cond_idx is not None else ("X", "E", "mask")
     step = len(history["step"])
     for epoch in range(start_epoch, epochs):
+        if train_sampler is not None:                      # reshuffle the shards each epoch
+            train_sampler.set_epoch(epoch)
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items() if k in keep}
             cond = _cond_from_batch(batch, cond_idx)
-            comp = train_step(model, method, batch, opt, lambda_E=lambda_E,
+            comp = train_step(ddp_model, method, batch, opt, lambda_E=lambda_E,
                               grad_clip=grad_clip, cond=cond, p_uncond=p_uncond)
             if ema is not None:
                 ema.update()
@@ -301,31 +373,38 @@ def train(epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12, lambda_E=1.0,
             history["loss_x"].append(comp["loss_x"])
             history["loss_e"].append(comp["loss_e"])
             if step % log_every == 0:
-                print(f"epoch {epoch} step {step} "
-                      f"loss {comp['loss']:.4f} "
-                      f"loss_x {comp['loss_x']:.4f} "
-                      f"loss_e {comp['loss_e']:.4f} "
-                      f"lr {sched.get_last_lr()[0]:.2e}")
+                log(f"epoch {epoch} step {step} "
+                    f"loss {comp['loss']:.4f} "
+                    f"loss_x {comp['loss_x']:.4f} "
+                    f"loss_e {comp['loss_e']:.4f} "
+                    f"lr {sched.get_last_lr()[0]:.2e}")
             step += 1
         sched.step()
-        val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema,
-                             cond_idx=cond_idx)
-        history["val_loss"].append(val_loss)
-        print(f"epoch {epoch} done — val_loss {val_loss:.4f}")
-        if save_path and val_loss < best_val:
-            best_val = val_loss
-            _save(epoch, best_ckpt, push=bool(push_repo), tag="best")
-        if save_path and save_every and (epoch + 1) % save_every == 0:
-            _save(epoch, save_path, push=bool(push_repo), tag="checkpoint")
+        # Validation, checkpoint selection and saving run on the main rank only; the other
+        # ranks skip them and block at the next epoch's first all-reduce until it rejoins.
+        if is_main:
+            val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema,
+                                 cond_idx=cond_idx)
+            history["val_loss"].append(val_loss)
+            log(f"epoch {epoch} done — val_loss {val_loss:.4f}")
+            if save_path and val_loss < best_val:
+                best_val = val_loss
+                _save(epoch, best_ckpt, push=bool(push_repo), tag="best")
+            if save_path and save_every and (epoch + 1) % save_every == 0:
+                _save(epoch, save_path, push=bool(push_repo), tag="checkpoint")
 
     # Final checkpoint: save live weights + EMA shadow (load_checkpoint overlays
     # EMA for eval) before installing EMA into the returned model.
-    if save_path:
+    if is_main and save_path:
         _save(epochs - 1, save_path, push=bool(push_repo), tag="final")
 
     # Install the EMA weights so sampling/evaluation on the returned model uses
     # them (the paper reports metrics under EMA). Training ran on live weights.
     if ema is not None:
         ema.copy_to(model.parameters())
+
+    if distributed:
+        import torch.distributed as dist
+        dist.destroy_process_group()
 
     return model, history, size_sampler, train_smiles, atom_vocab, k_X, k_E, test_smiles
