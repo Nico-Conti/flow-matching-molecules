@@ -1,5 +1,5 @@
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -79,6 +79,37 @@ def _val_loss(model, method, val_loader, lambda_E, device, ema=None, cond_idx=No
         with ema.average_parameters():
             return _run()
     return _run()
+
+
+@torch.no_grad()
+def _sample_validity(model, method, ema, size_sampler, k_X, k_E, n, steps, eta,
+                     distortion, atom_vocab, partial_charges, device, sample_seed,
+                     batch=256):
+    # Sample n molecules unconditionally under the EMA weights and count how many decode
+    # to a valid molecule. Reseeds (distinct per epoch/rank) for a diverse draw, and
+    # snapshots/restores the RNG so the check never perturbs the training stream.
+    from dataset.torch_dataset import unbatch
+    from dataset.metrics import validity_counts
+    dev = torch.device(device)
+    model.eval()
+    cpu_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state(dev) if dev.type == "cuda" else None
+    torch.manual_seed(sample_seed)
+    ctx = ema.average_parameters() if ema is not None else nullcontext()
+    n_valid = n_total = 0
+    with ctx:
+        for start in range(0, n, batch):
+            n_list = size_sampler.sample(min(batch, n - start))
+            Xoh, Eoh, mask = method.sample(model, n_list, k_X, k_E, steps=steps,
+                                           device=device, eta=eta, distortion=distortion)
+            nv, nt = validity_counts(unbatch(Xoh.cpu(), Eoh.cpu(), mask.cpu()),
+                                     atom_vocab, partial_charges)
+            n_valid += nv
+            n_total += nt
+    torch.set_rng_state(cpu_state)
+    if cuda_state is not None:
+        torch.cuda.set_rng_state(cuda_state, dev)
+    return n_valid, n_total
 
 
 def _resolve_rows(train_ds):
@@ -222,7 +253,9 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
            save_path=None, save_every=0, push_repo=None, resume=True,
            grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
            extra_features=None, rrwp_steps=12, dy=None,
-           cond_cols=None, p_uncond=0.15, cond_emb=64):
+           cond_cols=None, p_uncond=0.15, cond_emb=64,
+           val_sample_every=1, n_val_samples=1000, val_sample_steps=500,
+           val_sample_eta=0.0, val_sample_distortion="polydec"):
 
     from dataset.torch_dataset import collate_dense
 
@@ -295,11 +328,11 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None
 
     history = {"step": [], "epoch": [], "loss": [], "loss_x": [], "loss_e": [],
-               "val_loss": []}
+               "val_loss": [], "validity": []}
 
     from checkpoint import best_path as _best_path
     best_ckpt = _best_path(save_path) if save_path else None
-    best_val = float("inf")
+    best_V = -1.0
 
     def _save(epoch, path, push=False, tag="checkpoint"):
         # Saves live training weights + EMA shadow + optimizer/scheduler state.
@@ -312,7 +345,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                         optimizer=opt, scheduler=sched, epoch=epoch,
                         method=method_name,
                         extra={"dataset": dataset, "lambda_E": lambda_E,
-                               "seed": seed, "best_val": best_val,
+                               "seed": seed, "best_validity": best_V,
                                "cond_cols": list(cond_cols) if cond_cols else None,
                                "p_uncond": p_uncond})
         msg = f"  {tag} saved -> {path} (epoch {epoch})"
@@ -348,8 +381,8 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                     sched.load_state_dict(ck["scheduler"])
                 if ck.get("history"):
                     history = ck["history"]
-                if history.get("val_loss"):
-                    best_val = min(history["val_loss"])
+                if history.get("validity"):
+                    best_V = max(history["validity"])
                 if ck.get("rng_state") is not None:
                     try:
                         torch.set_rng_state(ck["rng_state"].cpu())
@@ -359,6 +392,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                 log(f"  resumed from {local} at epoch {start_epoch}")
 
     keep = ("X", "E", "mask", "y") if cond_idx is not None else ("X", "E", "mask")
+    partial = (dataset == "zinc")          # partial-charge decode for validity, auto by dataset
     step = len(history["step"])
     for epoch in range(start_epoch, epochs):
         if train_sampler is not None:                      # reshuffle the shards each epoch
@@ -383,15 +417,37 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                     f"lr {sched.get_last_lr()[0]:.2e}")
             step += 1
         sched.step()
-        # Validation, checkpoint selection and saving run on the main rank only; the other
-        # ranks skip them and block at the next epoch's first all-reduce until it rejoins.
+
+        # Generative validity on the EMA weights, computed on ALL ranks so the global
+        # fraction can be all-reduced; this (not val_loss) drives best-ckpt selection —
+        # val_loss and sample validity decouple here (see meetings/doctorand.md §5).
+        V = None
+        if val_sample_every and epoch % val_sample_every == 0:
+            per_rank = -(-n_val_samples // world_size)          # ceil: 1000 over 4 -> 250
+            nv, nt = _sample_validity(model, method, ema, size_sampler, k_X, k_E,
+                                      n=per_rank, steps=val_sample_steps, eta=val_sample_eta,
+                                      distortion=val_sample_distortion, atom_vocab=atom_vocab,
+                                      partial_charges=partial, device=device,
+                                      sample_seed=seed + 10000 + epoch * world_size + rank)
+            if distributed:
+                import torch.distributed as dist
+                counts = torch.tensor([nv, nt], device=device)
+                dist.all_reduce(counts)                         # sum valid/total over ranks
+                nv, nt = int(counts[0]), int(counts[1])
+            V = nv / max(nt, 1)
+
+        # val_loss, logging, checkpoint selection and saving on the main rank only; the
+        # other ranks skip them and block at the next epoch's first all-reduce.
         if is_main:
             val_loss = _val_loss(model, method, val_loader, lambda_E, device, ema=ema,
                                  cond_idx=cond_idx)
             history["val_loss"].append(val_loss)
-            log(f"epoch {epoch} done — val_loss {val_loss:.4f}")
-            if save_path and val_loss < best_val:
-                best_val = val_loss
+            if V is not None:
+                history["validity"].append(V)
+            log(f"epoch {epoch} done — val_loss {val_loss:.4f}"
+                + (f" — validity {V:.3f}" if V is not None else ""))
+            if V is not None and save_path and V > best_V:
+                best_V = V
                 _save(epoch, best_ckpt, push=bool(push_repo), tag="best")
             if save_path and save_every and (epoch + 1) % save_every == 0:
                 _save(epoch, save_path, push=bool(push_repo), tag="checkpoint")

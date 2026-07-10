@@ -43,3 +43,18 @@ def vun_from_graphs(graphs, train_smiles, atom_vocab=QM9_ATOMS, repair=False,
     if return_smiles:
         return out, gen
     return out
+
+
+def validity_counts(graphs, atom_vocab=QM9_ATOMS, partial_charges=False):
+    # (n_valid, n_total): how many graphs decode to a sanitizable molecule. Same decode
+    # path as vun_from_graphs but validity-only, so it's rank-decomposable — DDP workers
+    # each score a shard and the counts sum to a global validity fraction.
+    n_valid = 0
+    for X, E in graphs:
+        if partial_charges:
+            mol = build_mol_partial_charges(X, E, atom_vocab=atom_vocab)
+        else:
+            mol, _ = tensor_to_mol(X, E, atom_vocab=atom_vocab, repair=False)
+        if largest_fragment(mol) is not None:
+            n_valid += 1
+    return n_valid, len(graphs)
