@@ -338,6 +338,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
         # Saves live training weights + EMA shadow + optimizer/scheduler state.
         from checkpoint import save_checkpoint, push_checkpoint_to_hf
         val = history["val_loss"][-1] if history["val_loss"] else float("nan")
+        vld = history["validity"][-1] if history["validity"] else float("nan")
         save_checkpoint(path, model, k_X=k_X, k_E=k_E,
                         atom_vocab=atom_vocab, size_sampler=size_sampler,
                         train_smiles=train_smiles, history=history,
@@ -351,7 +352,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
         msg = f"  {tag} saved -> {path} (epoch {epoch})"
         if push and push_repo:
             push_checkpoint_to_hf(path, push_repo,
-                                  commit_message=f"{tag}: epoch {epoch}, val_loss {val:.4f}")
+                                  commit_message=f"{tag}: epoch {epoch}, val_loss {val:.4f}, validity {vld:.4f}")
             msg += f" + pushed to {push_repo}"
         print(msg)
 
@@ -381,6 +382,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                     sched.load_state_dict(ck["scheduler"])
                 if ck.get("history"):
                     history = ck["history"]
+                    history.setdefault("validity", [])     # pre-validity checkpoints lack it
                 if history.get("validity"):
                     best_V = max(history["validity"])
                 if ck.get("rng_state") is not None:
