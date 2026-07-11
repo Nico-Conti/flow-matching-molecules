@@ -338,7 +338,10 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
         # Saves live training weights + EMA shadow + optimizer/scheduler state.
         from checkpoint import save_checkpoint, push_checkpoint_to_hf
         val = history["val_loss"][-1] if history["val_loss"] else float("nan")
-        vld = history["validity"][-1] if history["validity"] else float("nan")
+        # report validity only if measured THIS epoch; else it'd be a stale value from the
+        # last val_sample_every epoch (periodic saves are offset from validity epochs).
+        measured = bool(val_sample_every) and epoch % val_sample_every == 0 and bool(history["validity"])
+        vld = history["validity"][-1] if measured else None
         save_checkpoint(path, model, k_X=k_X, k_E=k_E,
                         atom_vocab=atom_vocab, size_sampler=size_sampler,
                         train_smiles=train_smiles, history=history,
@@ -351,8 +354,9 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
                                "p_uncond": p_uncond})
         msg = f"  {tag} saved -> {path} (epoch {epoch})"
         if push and push_repo:
+            vstr = f", validity {vld:.4f}" if vld is not None else ""
             push_checkpoint_to_hf(path, push_repo,
-                                  commit_message=f"{tag}: epoch {epoch}, val_loss {val:.4f}, validity {vld:.4f}")
+                                  commit_message=f"{tag}: epoch {epoch}, val_loss {val:.4f}{vstr}")
             msg += f" + pushed to {push_repo}"
         print(msg)
 
