@@ -139,6 +139,15 @@ def _score_one(graph, cfg):
     mol = largest_fragment(mol)
     if mol is None:
         return "decode"
+    # FreeGress-style validity gate: count valid only if a 3D conformer also
+    # embeds (ETKDGv3+MMFF). DFT props embed anyway, so gate only the RDKit path.
+    if cfg["embed_gate"] and not cfg["needs_dft"]:
+        try:
+            embedded = embed_geometry(mol, seed=cfg["seed"])
+        except Exception:
+            embedded = None
+        if embedded is None:
+            return "embed"
     out = {}
     try:
         for c in cfg["target_cols"]:
@@ -221,7 +230,7 @@ def _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs
 
 def property_mae(graphs, y_targets, target_cols=("homo",),
                  atom_vocab=QM9_ATOMS, repair=False, partial_charges=False, seed=1,
-                 progress=False, n_jobs=None, **dft_kw):
+                 embed_gate=False, progress=False, n_jobs=None, **dft_kw):
     unknown = [c for c in target_cols if c not in RDKIT_FNS and c not in DFT_PROPS]
     if unknown:
         raise ValueError(f"unknown target columns {unknown}; "
@@ -232,6 +241,7 @@ def property_mae(graphs, y_targets, target_cols=("homo",),
 
     cfg = {"target_cols": tuple(target_cols), "atom_vocab": atom_vocab,
            "repair": repair, "partial_charges": partial_charges,
-           "needs_dft": needs_dft, "seed": seed, "dft_kw": dft_kw}
+           "needs_dft": needs_dft, "seed": seed, "dft_kw": dft_kw,
+           "embed_gate": embed_gate}
     desc = "dft" if needs_dft else "rdkit"
     return _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs)

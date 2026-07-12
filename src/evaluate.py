@@ -64,7 +64,7 @@ def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targe
                                 n_per_target=10, steps=100, t_end=1.0, device="cpu",
                                 eta=0.0, distortion="identity", batch=256,
                                 method="fm_graph", repair=False, partial_charges=False,
-                                seed=None, optimize=False, progress=True):
+                                seed=None, optimize=False, embed_gate=False, progress=True):
 
     from dataset.properties import property_mae
     if isinstance(method, str):
@@ -97,7 +97,7 @@ def evaluate_property_targeting(model, size_sampler, atom_vocab, k_X, k_E, targe
             bar.close()
         mae = property_mae(graphs, ys, target_cols=tuple(cond_cols),
                            atom_vocab=atom_vocab, repair=repair,
-                           partial_charges=partial_charges,
+                           partial_charges=partial_charges, embed_gate=embed_gate,
                            optimize=optimize, progress=progress)
         results[s] = mae
         print(f"s={s}: {mae}")
