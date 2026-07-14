@@ -251,7 +251,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
            lambda_E=1.0, ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
            seed=0, device=None, subset=None, log_every=50, dataset="qm9",
            save_path=None, save_every=0, push_repo=None, resume=True,
-           grad_clip=None, deterministic=False, method="fm_graph", n_layers=None,
+           grad_clip=None, amsgrad=False, deterministic=False, method="fm_graph", n_layers=None,
            extra_features=None, rrwp_steps=12, dy=None,
            cond_cols=None, p_uncond=0.15, cond_emb=64,
            val_sample_every=1, n_val_samples=1000, val_sample_steps=500,
@@ -323,7 +323,7 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
         ddp_model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[rank], find_unused_parameters=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, amsgrad=amsgrad)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     ema = EMA(model.parameters(), decay=ema_decay) if use_ema else None
 
