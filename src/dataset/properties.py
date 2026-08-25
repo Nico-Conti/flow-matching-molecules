@@ -236,7 +236,7 @@ def property_mae(graphs, y_targets, target_cols=("homo",),
         raise ValueError(f"unknown target columns {unknown}; "
                          f"known: {tuple(RDKIT_FNS) + DFT_PROPS}")
     needs_dft = any(c in DFT_PROPS for c in target_cols)
-    if n_jobs is None:                         # env knob: DFT_JOBS=64 ... (1 = serial)
+    if n_jobs is None:                         # env knob: DFT_JOBS=18 ... (1 = serial)
         n_jobs = int(os.environ.get("DFT_JOBS", "1"))
 
     cfg = {"target_cols": tuple(target_cols), "atom_vocab": atom_vocab,

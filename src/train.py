@@ -47,14 +47,16 @@ def _cond_from_batch(batch, cond_idx):
 
 
 def train_step(model, method, batch, optimizer, lambda_E=1.0, grad_clip=None,
-               cond=None, p_uncond=0.0):
+               cond=None, p_uncond=0.0, accum_steps=1, last_micro=True):
+    # accum_steps>1: one micro-batch. /K keeps the accumulated gradient a mean, so lr transfers.
     model.train()
-    optimizer.zero_grad()
     loss, parts = method.loss(model, batch, lambda_E=lambda_E, cond=cond, p_uncond=p_uncond)
-    loss.backward()
-    if grad_clip is not None:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    optimizer.step()
+    (loss / accum_steps).backward()
+    if last_micro:
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        optimizer.zero_grad()
     return {
         "loss": float(loss.detach()),
         "loss_x": float(parts["loss_x"]),
@@ -204,9 +206,13 @@ def train(devices=1, **hparams):
     to `_train` (see it for the full list and defaults), e.g.
     train(dataset="moses", method="defog", epochs=300, batch_size=128).
 
+    Effective batch = batch_size * devices * accum_steps.
+
     devices > 1 data-parallelizes across that many GPUs on one node: one worker
     process per GPU, gradients averaged automatically by DDP. A multi-GPU run's
     output is the rank-0 checkpoint (save_path / push_repo); train() returns None.
+    The machine is shared: 1 GPU is the budget, 2 only for a short period and with an
+    e-mail motivating it. Nothing here enforces that; set devices by hand.
     """
     if devices > 1:
         torch.multiprocessing.spawn(_spawn_entry, args=(devices, hparams), nprocs=devices)
@@ -247,7 +253,7 @@ def _make_train_loader(train_ds, batch_size, seed, rank, world_size):
     return loader, None
 
 
-def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e-12,
+def _train(rank, world_size, epochs=50, batch_size=128, accum_steps=1, lr=5e-4, weight_decay=1e-12,
            lambda_E=1.0, ema_decay=0.999, use_ema=True, val_frac=0.15, test_frac=0.10,
            seed=0, device=None, subset=None, log_every=50, dataset="qm9",
            save_path=None, save_every=0, push_repo=None, resume=True,
@@ -261,6 +267,8 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
 
     distributed = world_size > 1
     is_main = rank == 0
+    torch.set_num_threads(max(1, 18 // world_size))   # our 25% of the 72 physical cores,
+                                                      # split across ranks; else torch takes all 144
     def log(*a, **k):                        # only the main rank writes to stdout
         if is_main:
             print(*a, **k)
@@ -403,11 +411,20 @@ def _train(rank, world_size, epochs=50, batch_size=128, lr=5e-4, weight_decay=1e
     for epoch in range(start_epoch, epochs):
         if train_sampler is not None:                      # reshuffle the shards each epoch
             train_sampler.set_epoch(epoch)
-        for batch in train_loader:
+        n_micro = len(train_loader)
+        micro = []
+        for i, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items() if k in keep}
             cond = _cond_from_batch(batch, cond_idx)
+            last_micro = (i + 1) % accum_steps == 0 or (i + 1) == n_micro   # short tail still steps
             comp = train_step(ddp_model, method, batch, opt, lambda_E=lambda_E,
-                              grad_clip=grad_clip, cond=cond, p_uncond=p_uncond)
+                              grad_clip=grad_clip, cond=cond, p_uncond=p_uncond,
+                              accum_steps=accum_steps, last_micro=last_micro)
+            micro.append(comp)
+            if not last_micro:                 # a step is one optimizer move, not one micro-batch
+                continue
+            comp = {k: sum(m[k] for m in micro) / len(micro) for k in comp}
+            micro = []
             if ema is not None:
                 ema.update()
             history["step"].append(step)
