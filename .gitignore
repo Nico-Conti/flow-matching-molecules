@@ -42,3 +42,4 @@ docs/
 # discovers them via the `tests/` directory on disk. Reconsider before sharing
 # this repo more broadly — most projects track tests.
 tests/
+runs/

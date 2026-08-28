@@ -192,7 +192,7 @@ def _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs
     y_targets = np.asarray(y_targets, dtype="float64")
     n = len(graphs)
 
-    if n_jobs > 1 and cfg["needs_dft"]:
+    if n_jobs > 1 and (cfg["needs_dft"] or cfg["embed_gate"]):
         import functools, multiprocessing as mp
         worker = functools.partial(_score_one, cfg=cfg)
         with _single_thread_blas(), mp.get_context("fork").Pool(n_jobs, initializer=_worker_init) as pool:
@@ -209,18 +209,40 @@ def _mae_over_graphs(graphs, y_targets, target_cols, cfg, desc, progress, n_jobs
         props_list = [_score_one(g, cfg) for g in it]
 
     errs = {c: [] for c in target_cols}
+    target_errs = {c: [] for c in target_cols}
+    cur_y = None
+    cur_target_errs = {c: [] for c in target_cols}
     fails = Counter()
     n_ok = 0
     for props, y in zip(props_list, y_targets):
+        if cur_y is None or not np.allclose(y, cur_y):
+            if cur_y is not None:
+                for c in target_cols:
+                    if cur_target_errs[c]:
+                        target_errs[c].append(np.mean(cur_target_errs[c]))
+            cur_y = y
+            cur_target_errs = {c: [] for c in target_cols}
+
         if not isinstance(props, dict):
             fails[props] += 1
             continue
         n_ok += 1
         for j, c in enumerate(target_cols):
-            errs[c].append(abs(props[c] - float(y[j])))
+            val = abs(props[c] - float(y[j]))
+            errs[c].append(val)
+            cur_target_errs[c].append(val)
+
+    if cur_y is not None:
+        for c in target_cols:
+            if cur_target_errs[c]:
+                target_errs[c].append(np.mean(cur_target_errs[c]))
 
     out = {f"mae_{c}": (float(np.mean(errs[c])) if errs[c] else float("nan"))
            for c in target_cols}
+    out.update({f"std_{c}": (float(np.std(errs[c], ddof=1)) if len(errs[c]) > 1 else 0.0)
+                for c in target_cols})
+    out.update({f"target_std_{c}": (float(np.std(target_errs[c], ddof=1)) if len(target_errs[c]) > 1 else 0.0)
+                for c in target_cols})
     out["n_evaluated"] = n_ok
     out["n_total"] = n
     out["coverage"] = n_ok / n if graphs else 0.0
