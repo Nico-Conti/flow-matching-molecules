@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import random
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -32,6 +33,15 @@ def load_smiles_csv(path, expected_generated):
     return smiles
 
 
+def select_smiles(smiles, n_samples, seed):
+    if n_samples is None:
+        return smiles
+    if not 2 <= n_samples <= len(smiles):
+        raise ValueError(f"n-samples must be between 2 and {len(smiles):,}")
+    indices = sorted(random.Random(seed).sample(range(len(smiles)), n_samples))
+    return [smiles[i] for i in indices]
+
+
 def score_fresh(valid, references, device, batch_size, n_jobs):
     from fcd_torch import FCD
 
@@ -54,6 +64,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smiles-csv", type=Path, required=True)
     parser.add_argument("--expected-generated", type=int, default=25000)
+    parser.add_argument("--n-samples", type=int,
+                        help="Random subset size before invalid removal; default: all CSV rows")
+    parser.add_argument("--seed", type=int, default=0, help="Random subset seed (default: 0)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--n-jobs", type=int, default=2)
@@ -64,6 +77,10 @@ def main():
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("CUDA is unavailable; use a GPU host or --device cpu")
     smiles = load_smiles_csv(args.smiles_csv, args.expected_generated)
+    n_available = len(smiles)
+    smiles = select_smiles(smiles, args.n_samples, args.seed)
+    if args.n_samples is not None:
+        print(f"Selected {len(smiles):,}/{n_available:,} generated rows without replacement, seed={args.seed}", flush=True)
     valid = [s for s in smiles if s is not None]
     if len(valid) < 2:
         raise ValueError("FCD requires at least two valid molecules")
@@ -80,7 +97,10 @@ def main():
                          batch_size=args.batch_size, n_jobs=args.n_jobs)
     report = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "samples": {"path": str(args.smiles_csv.resolve()), "sha256": file_sha256(args.smiles_csv)},
+        "samples": {"path": str(args.smiles_csv.resolve()), "sha256": file_sha256(args.smiles_csv),
+                    "n_available": n_available,
+                    "selection": "all rows" if args.n_samples is None else "uniform rows without replacement; original order",
+                    "selection_seed": args.seed if args.n_samples is not None else None},
         "protocol": {"scorer": "fcd_torch.FCD", "generated_duplicates": "retained",
                      "reference_source": "full HF MOSES splits; stored SMILES without graph preprocessing",
                      "reference_statistics": "fresh; no statistics cache read or written"},
