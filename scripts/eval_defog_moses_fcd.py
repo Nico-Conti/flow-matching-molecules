@@ -117,9 +117,28 @@ def load_reference(path):
     raw = pd.read_csv(path)["SMILES"].tolist()
     # Same cleaning/representation checks as load_moses(apply_filter=False),
     # without calculating unused molecular property labels or accessing HF.
-    clean, _, stats = sanitize_smiles_dataset(
-        raw, MOSES_ATOMS, charge_aware=False, apply_filter=False)
+    with tqdm(raw, desc=f"Cleaning {path.name}", unit="mol") as molecules:
+        clean, _, stats = sanitize_smiles_dataset(
+            molecules, MOSES_ATOMS, charge_aware=False, apply_filter=False)
+    print(f"Reference ready: {len(clean):,}/{len(raw):,} molecules retained", flush=True)
     return clean, {"n_raw": len(raw), "n_reference": len(clean), "cleaning": stats}
+
+
+def load_hf_reference(repo_id):
+    from datasets import load_dataset
+    from huggingface_hub import HfApi
+
+    revision = HfApi().dataset_info(repo_id).sha
+    # These repositories store the MOSES evaluation split in an HF partition named train.
+    dataset = load_dataset(repo_id, split="train", revision=revision)
+    smiles = list(dataset["smiles"])
+    if not smiles or any(not isinstance(s, str) or not s.strip() for s in smiles):
+        raise ValueError(f"Empty or malformed reference SMILES in {repo_id}")
+    digest = hashlib.sha256("".join(s + "\n" for s in smiles).encode()).hexdigest()
+    print(f"HF reference ready: {len(smiles):,} molecules from {repo_id}", flush=True)
+    return smiles, {"repo_id": repo_id, "revision": revision, "hf_split": "train",
+                    "url": f"https://huggingface.co/datasets/{repo_id}/tree/{revision}",
+                    "n_reference": len(smiles), "smiles_sha256": digest}
 
 
 def score_smiles(smiles, references, device):
@@ -154,12 +173,16 @@ def main():
     parser.add_argument("--offset", type=int, default=0, help="Start index for another batch/fold (default: 0)")
     parser.add_argument("--device", default="auto", help="FCD device: auto, cpu, cuda, cuda:0, ...")
     parser.add_argument("--cache-dir", type=Path, default=ROOT / "data/defog_moses")
+    parser.add_argument("--reference-source", choices=("official", "hf-defog"), default="official",
+                        help="official: clean full MOSES CSVs; hf-defog: load historical filtered HF subsets directly")
     parser.add_argument("--test-csv", type=Path, help="Local official random Test CSV/CSV.gz")
     parser.add_argument("--test-scaffolds-csv", type=Path, help="Local official TestSF CSV/CSV.gz")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "runs/defog_moses_fcd" / datetime.now().strftime("%Y%m%d_%H%M%S"))
     args = parser.parse_args()
     if args.n_samples < 2 or args.offset < 0:
         parser.error("--n-samples must be >=2 and --offset must be >=0")
+    if args.reference_source == "hf-defog" and (args.test_csv or args.test_scaffolds_csv):
+        parser.error("--reference-source hf-defog cannot be combined with reference CSV paths")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     if device.startswith("cuda") and not torch.cuda.is_available():
         parser.error("CUDA is unavailable in this Python environment; use a GPU host or --device cpu")
@@ -189,6 +212,11 @@ def main():
     references, ref_info = {}, {}
     for label, split, supplied in [("Test", "test", args.test_csv),
                                    ("TestSF", "test_scaffolds", args.test_scaffolds_csv)]:
+        if args.reference_source == "hf-defog":
+            repo_id = f"nico8771/moses_{split}_defog"
+            print(f"Loading filtered {label} references from {repo_id} ...", flush=True)
+            references[label], ref_info[label] = load_hf_reference(repo_id)
+            continue
         url = MOSES_URL.format(split=split)
         path = supplied or download(url, args.cache_dir / f"{split}.csv.gz")
         print(f"Preparing {label} references from {path} ...", flush=True)
@@ -201,7 +229,11 @@ def main():
                     "url": None if args.samples else SAMPLES_URL, "offset": args.offset},
         "protocol": {"scorer": "evaluate._fcd", "generated_duplicates": "removed",
                      "decoder": "DeFoG aromatic bonds; strict sanitize; largest fragment; no repair",
-                     "reference_cleaning": "thesis sanitize_smiles_dataset(apply_filter=False)",
+                     "reference_source": args.reference_source,
+                     "reference_cleaning": (
+                         "stored HF SMILES; historical DeFoG filter_dataset=True subsets; no additional preprocessing"
+                         if args.reference_source == "hf-defog" else
+                         "thesis sanitize_smiles_dataset(apply_filter=False)"),
                      "checkpoint_provenance": "public retrained release; not original paper samples"},
         "device": device,
         "versions": {name: version(name) for name in ("torch", "rdkit", "fcd_torch", "numpy", "scipy")},
